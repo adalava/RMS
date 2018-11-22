@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<ufoanalyzer_record version ="200"
+	 clip_name="" o="" y="" mo=""
+	 d="" h="" m="" s=""
+	 tz="" tme="" lid="" sid=""
+	 lng="" lat="" alt="" cx=""
+	 cy="" fps="" interlaced="" bbf=""
+	 frames="" head="" tail="" drop=""
+	 dlev="" dsize="" sipos="" sisize=""
+	 trig="" observer="" cam="" lens=""
+	 cap="" u2="" ua="" memo=""
+	 az="" ev="" rot="" vx=""
+	 yx="" dx="" dy="" k4=""
+	 k3="" k2="" atc="" BVF=""
+	 maxLev="" maxMag="" minLev="" mimMag=""
+	 dl="" leap="" pixs="" rstar=""
+	 ddega="" ddegm="" errm="" Lmrgn=""
+	 Rmrgn="" Dmrgn="" Umrgn="">
+	<ua2_objects>
+<ua2_object
+	 fs="" fe="" fN="" sN=""
+	 sec="" av="" pix="" bmax=""
+	 bN="" Lmax="" mag="" cdeg=""
+	 cdegmax="" io="" raP="" dcP=""
+	 av1="" x1="" y1="" x2=""
+	 y2="" az1="" ev1="" az2=""
+	 ev2="" azm="" evm="" ra1=""
+	 dc1="" ra2="" dc2="" ram=""
+	 dcm="" class="" m="" dr=""
+	 dv="" Vo="" lng1="" lat1=""
+	 h1="" dist1="" gd1="" azL1=""
+	 evL1="" lng2="" lat2="" h2=""
+	 dist2="" gd2="" len="" GV=""
+	 rao="" dco="" Voo="" rat=""
+	 dct="" memo="">
+	<ua2_objpath>
+<ua2_fdata2 fno="" b="" bm="" Lsum="" mag="" az="" ev="" ra="" dec=""></ua2_fdata2>
+	</ua2_objpath>
+</ua2_object>
+	</ua2_objects>
+</ufoanalyzer_record>
