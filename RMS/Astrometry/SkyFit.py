@@ -52,7 +52,7 @@ from RMS.Formats.Platepar import Platepar
 from RMS.Formats.FrameInterface import detectInputType
 from RMS.Formats import StarCatalog
 from RMS.Astrometry.ApplyAstrometry import altAz2RADec, XY2CorrectedRADecPP, raDec2AltAz, raDecToCorrectedXY,\
-    rotationWrtHorizon, rotationWrtHorizonToPosAngle
+    rotationWrtHorizon, rotationWrtHorizonToPosAngle, computeFOVSize, photomLine, photometryFit
 from RMS.Astrometry.Conversions import date2JD, jd2Date
 from RMS.Routines import Image
 from RMS.Math import angularSeparation
@@ -226,6 +226,7 @@ class PlateTool(object):
 
         # Image coordinates of catalog stars
         self.catalog_x = self.catalog_y = None
+        self.mag_band_string = ''
 
         # Rotation with respect to the horizon
         self.rotation_horizon = None
@@ -299,7 +300,7 @@ class PlateTool(object):
             print('Platepar loaded:', self.platepar_file)
 
             # Print the field of view size
-            print("FOV: {:.2f} x {:.2f} deg".format(*self.computeFOVSize()))
+            print("FOV: {:.2f} x {:.2f} deg".format(*computeFOVSize(self.platepar)))
 
         
         # If the platepar file was not loaded, set initial values from config
@@ -574,24 +575,13 @@ class PlateTool(object):
             # Make sure there are more than 2 stars picked
             if len(logsum_px) > 2:
 
-                def _photomLine(x, k):
-                    # The slope is fixed to -2.5, coming from the definition of magnitude
-                    return -2.5*x + k
-
-
-                # Fit a line to the star data, where only the intercept has to be estimated
-                photom_params, _ = scipy.optimize.curve_fit(_photomLine, logsum_px, catalog_mags, \
-                    method='trf', loss='soft_l1')
-
-
-                # Calculate the standard deviation
-                fit_resids = np.array(catalog_mags) - _photomLine(np.array(logsum_px), *photom_params)
-                fit_stddev = np.std(fit_resids)
+                # Fit the photometric offset
+                photom_offset, fit_stddev, fit_resids = photometryFit(logsum_px, catalog_mags)
 
 
                 # Set photometry parameters
                 self.platepar.mag_0 = -2.5
-                self.platepar.mag_lev = photom_params[0]
+                self.platepar.mag_lev = photom_offset
                 self.platepar.mag_lev_stddev = fit_stddev
 
 
@@ -668,20 +658,12 @@ class PlateTool(object):
 
                     # Plot the line fit
                     logsum_arr = np.linspace(x_min_w, x_max_w, 10)
-                    ax_p.plot(logsum_arr, _photomLine(logsum_arr/(-2.5), *photom_params), label=fit_info, linestyle='--', color='k', alpha=0.5)
+                    ax_p.plot(logsum_arr, photomLine(logsum_arr/(-2.5), photom_offset), label=fit_info, \
+                        linestyle='--', color='k', alpha=0.5)
 
                     ax_p.legend()
-
-                    if 'BSC' in self.config.star_catalog_file:
-                        mag_str = "V"
-
-                    elif 'gaia' in self.config.star_catalog_file.lower():
-                        mag_str = 'GAIA G band'
-
-                    else:
-                        mag_str = "{:.2f}B + {:.2f}V + {:.2f}R + {:.2f}I".format(*self.config.star_catalog_band_ratios)
                         
-                    ax_p.set_ylabel("Catalog magnitude ({:s})".format(mag_str))
+                    ax_p.set_ylabel("Catalog magnitude ({:s})".format(self.mag_band_string))
                     ax_p.set_xlabel("Uncalibrated magnitude")
 
                     # Set wider axis limits
@@ -951,7 +933,7 @@ class PlateTool(object):
                 self.platepar_file = os.path.join(self.dir_path, self.config.platepar_name)
 
             # Save the platepar file
-            self.platepar.write(self.platepar_file, fmt=self.platepar_fmt, fov=self.computeFOVSize())
+            self.platepar.write(self.platepar_file, fmt=self.platepar_fmt, fov=computeFOVSize(self.platepar))
             print('Platepar written to:', self.platepar_file)
 
 
@@ -1157,7 +1139,7 @@ class PlateTool(object):
         """
 
         # Load catalog stars
-        catalog_stars = StarCatalog.readStarCatalog(self.config.star_catalog_path, \
+        catalog_stars, self.mag_band_string = StarCatalog.readStarCatalog(self.config.star_catalog_path, \
             self.config.star_catalog_file, lim_mag=lim_mag, \
             mag_band_ratios=self.config.star_catalog_band_ratios)
 
@@ -1547,7 +1529,7 @@ class PlateTool(object):
         ra_centre, dec_centre = self.computeCentreRADec()
 
         # Calculate the FOV radius in degrees
-        fov_y, fov_x = self.computeFOVSize()
+        fov_y, fov_x = computeFOVSize(self.platepar)
         fov_radius = np.sqrt(fov_x**2 + fov_y**2)
 
 
@@ -1774,39 +1756,6 @@ class PlateTool(object):
 
         if update_image:
             self.updateImage()
-
-
-
-    def computeFOVSize(self):
-        """ Computes the size of the FOV in deg from the given platepar. 
-        
-        Return:
-            fov_h: [float] Horizontal FOV in degrees.
-            fov_v: [float] Vertical FOV in degrees.
-        """
-
-        # Construct poinits on the middle of every side of the image
-        time_data = np.array(4*[jd2Date(self.platepar.JD)])
-        x_data = np.array([0, self.platepar.X_res, self.platepar.X_res/2, self.platepar.X_res/2])
-        y_data = np.array([self.platepar.Y_res/2, self.platepar.Y_res/2, 0, self.platepar.Y_res])
-        level_data = np.ones(4)
-
-        # Compute RA/Dec of the points
-        _, ra_data, dec_data, _ = XY2CorrectedRADecPP(time_data, x_data, y_data, level_data, self.platepar)
-
-        ra1, ra2, ra3, ra4 = ra_data
-        dec1, dec2, dec3, dec4 = dec_data
-
-        # Compute horizontal FOV
-        fov_h = np.degrees(angularSeparation(np.radians(ra1), np.radians(dec1), np.radians(ra2), \
-            np.radians(dec2)))
-
-        # Compute vertical FOV
-        fov_v = np.degrees(angularSeparation(np.radians(ra3), np.radians(dec3), np.radians(ra4), \
-            np.radians(dec4)))
-
-
-        return fov_h, fov_v
 
 
     def loadFlat(self):
@@ -2425,7 +2374,7 @@ class PlateTool(object):
             mean_angular_error, angular_error_label))
 
         # Print the field of view size
-        print("FOV: {:.2f} x {:.2f} deg".format(*self.computeFOVSize()))
+        print("FOV: {:.2f} x {:.2f} deg".format(*computeFOVSize(self.platepar)))
 
 
         ####################
