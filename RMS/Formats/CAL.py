@@ -4,8 +4,15 @@ from __future__ import print_function, division, absolute_import
 
 
 import os
+import copy
+import math
+
+
 from RMS.Astrometry.Conversions import jd2Date
+from RMS.Astrometry.ApplyAstrometry import rotationWrtHorizon, rotationWrtStandard
 from RMS.Formats.Platepar import Platepar
+
+
 
 def writeCAL(night_dir, config, platepar):
     """ Write the CAL file. 
@@ -37,6 +44,49 @@ def writeCAL(night_dir, config, platepar):
     if platepar is None:
         platepar = Platepar()
 
+    # Make a copy of the platepar that can be modified
+    platepar = copy.deepcopy(platepar)
+
+
+    # Compute rotations (must be done before distorsion correction)
+    rot_horiz = rotationWrtHorizon(platepar)
+    rot_std = rotationWrtStandard(platepar)
+
+
+    # Switch ry in Y coeffs
+    platepar.y_poly_fwd[11], platepar.y_poly_fwd[10] = platepar.y_poly_fwd[10], platepar.y_poly_fwd[11]
+
+
+    # Correct distorsion parameters so they are CAMS compatible
+    platepar.x_poly_fwd[ 1] = +platepar.x_poly_fwd[ 1] + 1.0
+    platepar.x_poly_fwd[ 2] = -platepar.x_poly_fwd[ 2]
+    platepar.x_poly_fwd[ 4] = -platepar.x_poly_fwd[ 4]
+    platepar.x_poly_fwd[ 7] = -platepar.x_poly_fwd[ 7]
+    platepar.x_poly_fwd[ 9] = -platepar.x_poly_fwd[ 9]
+    platepar.x_poly_fwd[11] = -platepar.x_poly_fwd[11]
+    platepar.y_poly_fwd[ 2] = -platepar.y_poly_fwd[ 2] - 1.0
+    platepar.y_poly_fwd[ 4] = -platepar.y_poly_fwd[ 4]
+    platepar.y_poly_fwd[ 7] = -platepar.y_poly_fwd[ 7]
+    platepar.y_poly_fwd[ 9] = -platepar.y_poly_fwd[ 9]
+    platepar.y_poly_fwd[11] = -platepar.y_poly_fwd[11]
+
+
+    # Compute scale in arcmin/px
+    arcminperpixel = 60/platepar.F_scale
+
+    # Correct scaling and rotation
+    for k in range(12):
+        
+        x_prime = platepar.x_poly_fwd[k]*math.radians(arcminperpixel/60.0)
+        y_prime = platepar.y_poly_fwd[k]*math.radians(arcminperpixel/60.0)
+
+        platepar.x_poly_fwd[k] = math.cos(math.radians(platepar.pos_angle_ref))*x_prime \
+            + math.sin(math.radians(platepar.pos_angle_ref))*y_prime
+
+        platepar.y_poly_fwd[k] = math.sin(math.radians(platepar.pos_angle_ref))*x_prime \
+            - math.cos(math.radians(platepar.pos_angle_ref))*y_prime
+
+
     # Open the file
     with open(os.path.join(night_dir, file_name), 'w') as f:
 
@@ -51,10 +101,10 @@ def writeCAL(night_dir, config, platepar):
         s +=" Longitude +west (deg)    = {:9.5f}\n".format(-platepar.lon)
         s +=" Latitude +north (deg)    = {:9.5f}\n".format(platepar.lat)
         s +=" Height above WGS84 (km)  = {:8.5f}\n".format(platepar.elev/1000)
-        s +=" FOV dimension hxw (deg)  =   {:.2f} x   {:.2f}\n".format(platepar.fov_h, platepar.fov_v)
-        s +=" Plate scale (arcmin/pix) = {:8.3f}\n".format(60/platepar.F_scale)
-        s +=" Plate roll wrt Std (deg) = {:8.3f}\n".format(platepar.pos_angle_ref)
-        s +=" Cam tilt wrt Horiz (deg) =    0.000\n"
+        s +=" FOV dimension hxw (deg)  =   {:.2f} x   {:.2f}\n".format(platepar.fov_v, platepar.fov_h)
+        s +=" Plate scale (arcmin/pix) = {:8.3f}\n".format(arcminperpixel)
+        s +=" Plate roll wrt Std (deg) = {:8.3f}\n".format(rot_std)
+        s +=" Cam tilt wrt Horiz (deg) = {:8.3f}\n".format(rot_horiz)
         s +=" Frame rate (Hz)          = {:8.3f}\n".format(config.fps)
         s +=" Cal center RA (deg)      = {:8.3f}\n".format(platepar.RA_d)
         s +=" Cal center Dec (deg)     = {:8.3f}\n".format(platepar.dec_d)
@@ -83,18 +133,18 @@ def writeCAL(night_dir, config, platepar):
         s +="\n"
         s +=" Term       Xcoef            Ycoef     \n"
         s +=" ----  ---------------  ---------------\n"
-        s +=" 1     {:+.8e}  {:+.8e} \n".format(platepar.x_poly[0], platepar.y_poly[0])
-        s +=" x     {:+.8e}  {:+.8e} \n".format(platepar.x_poly[1], platepar.y_poly[1])
-        s +=" y     {:+.8e}  {:+.8e} \n".format(platepar.x_poly[2], platepar.y_poly[2])
-        s +=" xx    {:+.8e}  {:+.8e} \n".format(platepar.x_poly[3], platepar.y_poly[3])
-        s +=" xy    {:+.8e}  {:+.8e} \n".format(platepar.x_poly[4], platepar.y_poly[4])
-        s +=" yy    {:+.8e}  {:+.8e} \n".format(platepar.x_poly[5], platepar.y_poly[5])
-        s +=" xxx   {:+.8e}  {:+.8e} \n".format(platepar.x_poly[6], platepar.y_poly[6])
-        s +=" xxy   {:+.8e}  {:+.8e} \n".format(platepar.x_poly[7], platepar.y_poly[7])
-        s +=" xyy   {:+.8e}  {:+.8e} \n".format(platepar.x_poly[8], platepar.y_poly[8])
-        s +=" yyy   {:+.8e}  {:+.8e} \n".format(platepar.x_poly[9], platepar.y_poly[9])
-        s +=" rx    {:+.8e}  {:+.8e} \n".format(platepar.x_poly[10], platepar.y_poly[11])
-        s +=" ry    {:+.8e}  {:+.8e} \n".format(platepar.x_poly[11], platepar.y_poly[10])
+        s +=" 1     {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[0], platepar.y_poly_fwd[0])
+        s +=" x     {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[1], platepar.y_poly_fwd[1])
+        s +=" y     {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[2], platepar.y_poly_fwd[2])
+        s +=" xx    {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[3], platepar.y_poly_fwd[3])
+        s +=" xy    {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[4], platepar.y_poly_fwd[4])
+        s +=" yy    {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[5], platepar.y_poly_fwd[5])
+        s +=" xxx   {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[6], platepar.y_poly_fwd[6])
+        s +=" xxy   {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[7], platepar.y_poly_fwd[7])
+        s +=" xyy   {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[8], platepar.y_poly_fwd[8])
+        s +=" yyy   {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[9], platepar.y_poly_fwd[9])
+        s +=" rx    {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[10], platepar.y_poly_fwd[10])
+        s +=" ry    {:+.7e}    {:+.7e} \n".format(platepar.x_poly_fwd[11], platepar.y_poly_fwd[11])
         s +=" ----  ---------------  ---------------\n"
         s +="\n"
         s +=" Mean O-C =   0.000 +-   0.000 arcmin\n"
@@ -131,11 +181,11 @@ if __name__ == "__main__":
 
     # Load a platepar file
     pp = Platepar()
-    #pp.read("/mnt/bulk/2018Draconids/ConfirmedFiles/HR0010_20181008_170022_956418_detected/platepar_cmn2010.cal")
+    pp.read("/home/dvida/Desktop/HR0010_20190216_170146_265550_detected/platepar_cmn2010.cal")
 
 
-    #night_dir = "/mnt/bulk/2018Draconids/ConfirmedFiles/HR0010_20181008_170022_956418_detected"
-    night_dir = "D:/Dropbox/RPi_Meteor_Station/data/CA0004_20180516_040459_588816_detected"
+    night_dir = "/home/dvida/Desktop/HR0010_20190216_170146_265550_detected"
+    #night_dir = "D:/Dropbox/RPi_Meteor_Station/data/CA0004_20180516_040459_588816_detected"
 
     # Write the CAL file
     writeCAL(night_dir, config, pp)

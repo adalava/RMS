@@ -28,17 +28,18 @@ import RMS.ConfigReader as cr
 from RMS.Formats import FTPdetectinfo
 from RMS.Formats import CALSTARS
 from RMS.Formats.FFfile import validFFName
+from RMS.Formats.FrameInterface import detectInputType
 from RMS.ExtractStars import extractStars
 from RMS.Detection import detectMeteors
+from RMS.DetectionTools import loadImageCalibration
 from RMS.QueuedPool import QueuedPool
-from RMS.Routines import Image
 
 
 # Get the logger from the main module
 log = logging.getLogger("logger")
 
 
-def detectStarsAndMeteors(ff_directory, ff_name, config, flat_struct=None):
+def detectStarsAndMeteors(ff_directory, ff_name, config, flat_struct=None, dark=None, mask=None):
     """ Run the star extraction and subsequently runs meteor detection on the FF file if there are enough
         stars on the image.
 
@@ -49,6 +50,8 @@ def detectStarsAndMeteors(ff_directory, ff_name, config, flat_struct=None):
 
     Keyword arguments:
         flat_struct: [Flat struct] Structure containing the flat field. None by default.
+        dark: [ndarray]
+        mask: [MaskStruct]
 
     Return:
         [ff_name, star_list, meteor_list] detected stars and meteors
@@ -57,22 +60,37 @@ def detectStarsAndMeteors(ff_directory, ff_name, config, flat_struct=None):
 
     log.info('Running detection on file: ' + ff_name)
 
-    # Run star extraction on the FF bin
-    star_list = extractStars(ff_directory, ff_name, config, flat_struct=flat_struct)
 
-    log.info('Detected stars: ' + str(len(star_list[0])))
+    # Construct the image handle for the detection
+    img_handle = detectInputType(os.path.join(ff_directory, ff_name), config, skip_ff_dir=True, \
+        detection=True)
+
+
+    # Load mask, dark, flat
+    mask, dark, flat_struct = loadImageCalibration(ff_directory, config, dtype=img_handle.ff.dtype, \
+        byteswap=img_handle.byteswap)
+
+
+    # Run star extraction
+    star_list = extractStars(ff_directory, ff_name, config, flat_struct=flat_struct, dark=dark, mask=mask)
+
+
+    log.info('Detected stars: ' + str(len(star_list[1])))
+
 
     # Run meteor detection if there are enough stars on the image
-    if len(star_list[0]) >= config.ff_min_stars:
+    if len(star_list[1]) >= config.ff_min_stars:
 
         log.debug('More than ' + str(config.ff_min_stars) + ' stars, detecting meteors...')
 
-        meteor_list = detectMeteors(ff_directory, ff_name, config, flat_struct=flat_struct)
+        # Runt the detection
+        meteor_list = detectMeteors(img_handle, config, flat_struct=flat_struct, dark=dark, mask=mask)
 
         log.info(ff_name + ' detected meteors: ' + str(len(meteor_list)))
 
     else:
         meteor_list = []
+
 
 
     return ff_name, star_list, meteor_list
@@ -104,6 +122,10 @@ def saveDetections(detection_results, ff_dir, config):
     # Remove all 'None' results, which were errors
     detection_results = [res for res in detection_results if res is not None]
 
+    # Sort by FF name
+    detection_results = sorted(detection_results, key=lambda x: x[0])
+
+
     # Count the number of detected meteors
     meteors_num = 0
     for _, _, meteor_data in detection_results:
@@ -116,7 +138,12 @@ def saveDetections(detection_results, ff_dir, config):
     # Save the detections to a file
     for ff_name, star_data, meteor_data in detection_results:
 
-        x2, y2, background, intensity = star_data
+
+        if len(star_data) == 4:
+            x2, y2, background, intensity = star_data
+        else:
+            _, x2, y2, background, intensity, _ = star_data
+            
 
         # Skip if no stars were found
         if not x2:
@@ -184,23 +211,10 @@ def detectStarsAndMeteorsDirectory(dir_path, config):
 
 
     # Check if there are any file in the directory
-    if(len(ff_list) == None):
-        print("No files found!")
-        sys.exit()
+    if not len(ff_list):
 
-
-    # Try loading a flat field image
-    flat_struct = None
-
-    if config.use_flat:
-        
-        # Check if there is flat in the data directory
-        if os.path.exists(os.path.join(ff_dir, config.flat_file)):
-            flat_struct = Image.loadFlat(ff_dir, config.flat_file)
-
-        # Try loading the default flat
-        elif os.path.exists(config.flat_file):
-            flat_struct = Image.loadFlat(os.getcwd(), config.flat_file)
+        print("No files for processing found!")
+        return None, None, None, None
 
 
     print('Starting detection...')
@@ -208,14 +222,22 @@ def detectStarsAndMeteorsDirectory(dir_path, config):
     # Initialize the detector
     detector = QueuedPool(detectStarsAndMeteors, cores=-1, log=log, backup_dir=ff_dir)
 
-    # Give detector jobs
-    for ff_name in ff_list:
-        print('Adding for detection:', ff_name)
-        detector.addJob([ff_dir, ff_name, config, flat_struct], wait_time=0)
-
-
     # Start the detection
     detector.startPool()
+
+    # Give detector jobs
+    for ff_name in ff_list:
+
+        while True:
+            
+            # Add a job as long as there are available workers to receive it
+            if detector.available_workers.value() > 0:
+                print('Adding for detection:', ff_name)
+                detector.addJob([ff_dir, ff_name, config], wait_time=0)
+                break
+            else:
+                time.sleep(0.1)
+
 
 
     log.info('Waiting for the detection to finish...')
@@ -246,16 +268,6 @@ if __name__ == "__main__":
     time_start = datetime.datetime.utcnow()
 
 
-    ### Init the logger
-
-    from RMS.Logger import initLogging
-    initLogging('detection_')
-
-    log = logging.getLogger("logger")
-
-    ######
-
-
     ### COMMAND LINE ARGUMENTS
 
     # Init the command line arguments parser
@@ -272,18 +284,18 @@ if __name__ == "__main__":
 
     #########################
 
-    if cml_args.config is not None:
+    # Load the config file
+    config = cr.loadConfigFromDirectory(cml_args.config, cml_args.dir_path)
 
-        config_file = os.path.abspath(cml_args.config[0].replace('"', ''))
 
-        print('Loading config file:', config_file)
+    ### Init the logger
 
-        # Load the given config file
-        config = cr.parse(config_file)
+    from RMS.Logger import initLogging
+    initLogging(config, 'detection_')
 
-    else:
-        # Load the default configuration file
-        config = cr.parse(".config")
+    log = logging.getLogger("logger")
+
+    ######
 
 
     # Run detection on the folder

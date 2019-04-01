@@ -18,7 +18,6 @@ from __future__ import print_function, absolute_import
 
 import os
 import sys
-import gc
 import argparse
 import time
 import datetime
@@ -26,6 +25,7 @@ import signal
 import ctypes
 import logging
 import multiprocessing
+import traceback
 
 import numpy as np
 
@@ -42,7 +42,7 @@ from RMS.LiveViewer import LiveViewer
 from RMS.Misc import mkdirP
 from RMS.QueuedPool import QueuedPool
 from RMS.Reprocess import getPlatepar, processNight
-from RMS.Routines import Image
+from RMS.RunExternalScript import runExternalScript
 from RMS.UploadManager import UploadManager
 
 
@@ -157,22 +157,8 @@ def runCapture(config, duration=None, video_file=None, nodetect=False, detect_en
     log.info('Data directory: ' + night_data_dir)
 
 
-
-    # Load the default flat field image if it is available
-    flat_struct = None
-
-    if config.use_flat:
-
-        # Check if the flat exists
-        if os.path.exists(os.path.join(os.getcwd(), config.flat_file)):
-            flat_struct = Image.loadFlat(os.getcwd(), config.flat_file)
-
-            log.info('Loaded flat field image: ' + os.path.join(os.getcwd(), config.flat_file))
-
-
-
     # Get the platepar file
-    platepar, platepar_path, platepar_fmt = getPlatepar(config)
+    platepar, platepar_path, platepar_fmt = getPlatepar(config, night_data_dir)
 
 
     log.info('Initializing frame buffers...')
@@ -241,10 +227,8 @@ def runCapture(config, duration=None, video_file=None, nodetect=False, detect_en
 
     
     # Initialize compression
-    #compressor_handle = CompressorHandler(night_data_dir, sharedArray, startTime, sharedArray2, startTime2, \
-    #    config, detector=detector, live_view=live_view, flat_struct=flat_struct)
-    compressor = Compressor(night_data_dir, sharedArray, startTime, sharedArray2, startTime2, \
-        config, detector=detector, live_view=live_view, flat_struct=flat_struct)
+    compressor = Compressor(night_data_dir, sharedArray, startTime, sharedArray2, startTime2, config, 
+        detector=detector, live_view=live_view)
 
     
     # Start buffered capture
@@ -283,11 +267,9 @@ def runCapture(config, duration=None, video_file=None, nodetect=False, detect_en
         del sharedArrayBase2
         del sharedArray2
 
-        # Run garbage collection
-        gc.collect()
-
     except Exception as e:
         log.debug('Freeing frame buffers failed with error:' + repr(e))
+        log.debug(repr(traceback.format_exception(*sys.exc_info())))
 
     log.debug('Compression stopped')
 
@@ -378,13 +360,13 @@ def runCapture(config, duration=None, video_file=None, nodetect=False, detect_en
 
 
     # Save detection to disk and archive detection    
-    archive_name, _ = processNight(night_data_dir, config, detection_results=detection_results, \
-        nodetect=nodetect)
+    night_archive_dir, archive_name, _ = processNight(night_data_dir, config, \
+        detection_results=detection_results, nodetect=nodetect)
 
 
     # Put the archive up for upload
     if upload_manager is not None:
-        log.info('Adding file on upload list: ' + archive_name)
+        log.info('Adding file to upload list: ' + archive_name)
         upload_manager.addFiles([archive_name])
         log.info('File added...')
 
@@ -395,9 +377,14 @@ def runCapture(config, duration=None, video_file=None, nodetect=False, detect_en
 
 
     # If the capture was run for a limited time, run the upload right away
-    if duration is not None:
+    if (duration is not None) and (upload_manager is not None):
         log.info('Uploading data before exiting...')
         upload_manager.uploadData()
+
+
+    # Run the external script
+    runExternalScript(night_data_dir, night_archive_dir, config)
+    
 
     # If capture was manually stopped, end program
     if STOP_CAPTURE:
@@ -418,10 +405,6 @@ def runCapture(config, duration=None, video_file=None, nodetect=False, detect_en
 
 if __name__ == "__main__":
 
-    # Load the configuration file
-    config = cr.parse(".config")
-
-
     ### COMMAND LINE ARGUMENTS
 
     # Init the command line arguments parser
@@ -431,8 +414,12 @@ if __name__ == "__main__":
     # Add a mutually exclusive for the parser (the arguments in the group can't be given at the same)
     arg_group = arg_parser.add_mutually_exclusive_group()
 
+    arg_parser.add_argument('-c', '--config', nargs=1, metavar='CONFIG_PATH', type=str, \
+        help="Path to a config file which will be used instead of the default one.")
+
     arg_group.add_argument('-d', '--duration', metavar='DURATION_HOURS', help="""Start capturing right away, 
         with the given duration in hours. """)
+
     arg_group.add_argument('-i', '--input', metavar='FILE_PATH', help="""Use video from the given file, 
         not from a video device. """)
 
@@ -447,9 +434,11 @@ if __name__ == "__main__":
 
     ######
 
+    # Load the config file
+    config = cr.loadConfigFromDirectory(cml_args.config, os.path.abspath('.'))
 
     # Initialize the logger
-    initLogging()
+    initLogging(config)
 
     # Get the logger handle
     log = logging.getLogger("logger")

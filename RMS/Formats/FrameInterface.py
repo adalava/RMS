@@ -6,6 +6,7 @@ from __future__ import print_function, division, absolute_import
 import os
 import sys
 import copy
+import time
 import datetime
 
 # tkinter import that works on both Python 2 and 3
@@ -18,13 +19,20 @@ except:
 import cv2
 import numpy as np
 
-from RMS.Astrometry.Conversions import unixTime2Date
+from RMS.Astrometry.Conversions import unixTime2Date, datetime2UnixTime
 from RMS.Formats.FFfile import read as readFF
 from RMS.Formats.FFfile import reconstructFrame as reconstructFrameFF
 from RMS.Formats.FFfile import validFFName, filenameToDatetime
-from RMS.Formats.FFfile import getMiddleTimeFF
+from RMS.Formats.FFfile import getMiddleTimeFF, selectFFFrames
 from RMS.Formats.Vid import readFrame as readVidFrame
 from RMS.Formats.Vid import VidStruct
+from RMS.Routines import Image
+
+
+# Morphology - Cython init
+import pyximport
+pyximport.install(setup_args={'include_dirs':[np.get_include()]})
+from RMS.Routines.DynamicFTPCompressionCy import FFMimickInterface
 
 
 def getCacheID(first_frame, size):
@@ -59,92 +67,6 @@ def computeFramesToRead(read_nframes, total_frames, fr_chunk_no, current_frame_c
 
 
 
-def selectFFFrames(img_input, ff, frame_min, frame_max):
-    """ Select only pixels in a given frame range. 
-    
-    Arguments:
-        img_input: [2D ndarray] Input image.
-        ff: [FF object] FF image object
-        frame_min: [int] first frame in a range to take
-        frame_max: [int] last frame in a range to take
-    
-    Return:
-        [ndarray] image with pixels only from the given frame range
-    """
-
-    # Get the indices of image positions with times correspondng to the subdivision
-    indices = np.where((ff.maxframe >= frame_min) & (ff.maxframe <= frame_max))
-
-    # Reconstruct the image with given indices
-    img = np.copy(ff.avepixel)
-    img[indices] = img_input[indices]
-
-    return img
-
-
-
-class FFMimickInterface(object):
-    def __init__(self, nrows, ncols, nframes, dtype):
-        """ Structure which is used to make FF file format data. It mimicks the interface of an FF structure. """
-
-        self.nrows = nrows
-        self.ncols = ncols
-        self.nframes = nframes
-        self.dtype = dtype
-
-        # Init the empty structures
-        self.maxpixel = np.zeros(shape=(self.nrows, self.ncols), dtype=self.dtype)
-        self.avepixel = np.zeros(shape=(self.nrows, self.ncols), dtype=np.float64)
-        self.stdpixel = np.zeros(shape=(self.nrows, self.ncols), dtype=np.float64)
-
-
-    def addFrame(self, frame):
-        """ Add raw frame for computation of FF data. """
-
-        # Get the maximum values
-        self.maxpixel = np.max([self.maxpixel, frame], axis=0)
-
-        # If there are less than 3 frames, don't compute the std, compute simplified average
-        if self.nframes < 3:
-
-            self.avepixel += frame.astype(np.float64)/self.nframes
-
-
-        # If there are 3 or more frames, compute the max subtracted average and stddev
-        else:
-            
-            # Compute the running average
-            self.avepixel += frame.astype(np.float64)/(self.nframes - 1)
-
-            # Add frame values for standard deviation computation
-            self.stdpixel += (frame.astype(np.float64)**2)/(self.nframes - 2)
-
-
-    def finish(self):
-        """ Finish making an FF structure. """
-
-        # If there are 3 or more frames, compute the max subtracted average and stddev
-        if self.nframes >= 3:
-
-            # Remove the contribution of the maxpixel to the avepixel
-            self.avepixel -= self.maxpixel.astype(np.float64)/(self.nframes - 1)
-            
-
-            # Compute the standard deviation
-            self.stdpixel -= (self.maxpixel.astype(np.float64)**2)/(self.nframes - 2)
-            self.stdpixel -= self.avepixel**2
-            self.stdpixel = np.sqrt(self.stdpixel)
-
-        # Make sure there are no zeros in standard deviation
-        self.stdpixel[self.stdpixel == 0] = 1
-
-        # Convert stddev and avepixel to appropriate format
-        self.avepixel = self.avepixel.astype(self.dtype)
-        self.stdpixel = self.stdpixel.astype(self.dtype)
-        
-        
-
-
 class InputTypeFF(object):
     def __init__(self, dir_path, config, single_ff=False):
         """ Input file type handle for FF files.
@@ -156,6 +78,8 @@ class InputTypeFF(object):
         Keyword arguments:
             single_ff: [bool] If True, a single FF file should be given as input, and not a directory with FF
                 files. False by default.
+            detection: [bool] Indicates that the input is used for detection. False by default. Has no effect
+                for FF files.
 
         """
 
@@ -164,13 +88,15 @@ class InputTypeFF(object):
         self.dir_path = dir_path
         self.config = config
 
+        self.single_ff = single_ff
+
         # This type of input should have the calstars file
         self.require_calstars = True
 
         # Don't byteswap the images
         self.byteswap = False
 
-        if single_ff:
+        if self.single_ff:
             print('Using FF file:', self.dir_path)
         else:
             print('Using FF files from:', self.dir_path)
@@ -183,7 +109,7 @@ class InputTypeFF(object):
 
 
         # Add the single FF file to the list
-        if single_ff:
+        if self.single_ff:
 
             self.dir_path, file_name = os.path.split(self.dir_path)
 
@@ -343,9 +269,6 @@ class InputTypeFF(object):
         # If a selection of frames has to be reconstructed, go through all FF files and create new FF
         else:
 
-            # Store the current frame
-            current_frame_bak = self.current_frame
-
             # Determine which FF files are to be read and which frame ranges from each
             frame_ranges = []
             ffs_to_read = []
@@ -374,61 +297,81 @@ class InputTypeFF(object):
                 else:
                     frame_ranges[len(ffs_to_read) - 1].append(ff_local_index)
 
+            # If there is only one FF file to read, make a selection of frames, but preserve everything else
+            if len(ffs_to_read) == 1:
 
-            # Init an empty FF structure
-            self.ff = FFMimickInterface(self.nrows, self.ncols, self.fr_chunk_no, np.uint8)
+                file_name = ffs_to_read[0]
 
-            # Store maxpixel selections, avepixels, stdpixels
-            maxpixel_list = []
-            avepixel_list = []
-            stdpixel_list = []
-
-            # Read the FF files that have to read and reconstruct the frames
-            for file_name, frame_range in zip(ffs_to_read, frame_ranges):
+                frame_range = frame_ranges[0]
 
                 # Compute the range of frames to read
                 min_frame = np.min(frame_range)
                 max_frame = np.max(frame_range)
 
                 # Read the FF file
-                ff = readFF(self.dir_path, file_name)
+                self.ff = readFF(self.dir_path, file_name)
 
-                # Reconstruct the maxpixel in the given frame range
-                maxpixel = selectFFFrames(ff.maxpixel, ff, min_frame, max_frame)
-
-                # Reconstruct the avepixel in the given frame range
-                avepixel = selectFFFrames(ff.avepixel, ff, min_frame, max_frame)
-
-                # Store the computed frames
-                maxpixel_list.append(maxpixel)
-                avepixel_list.append(avepixel)
-                stdpixel_list.append(ff.stdpixel)
+                # Select the frames
+                self.ff.maxpixel = selectFFFrames(self.ff.maxpixel, self.ff, min_frame, max_frame)
 
 
-            # Immidiately extract the appropriate frames
-            if len(maxpixel_list) == 1:
-
-                self.ff.maxpixel = maxpixel_list[0]
-                self.ff.avepixel = avepixel_list[0]
-                self.ff.stdpixel = stdpixel_list[0]
-
-            # Otherwise, compute the combined FF
             else:
-                maxpixel_list = np.array(maxpixel_list)
-                avepixel_list = np.array(avepixel_list)
-                stdpixel_list = np.array(stdpixel_list)
-
-                self.ff.maxpixel = np.max(maxpixel_list, axis=0)
-
-                # The maximum of the avepixel is taken because only the frame range of avepixel is taken
-                self.ff.avepixel = np.max(avepixel_list, axis=0)
-
-                self.ff.stdpixel = np.max(stdpixel_list, axis=0)
 
 
-            # Set the current frame back to the value before the reconstruction
-            self.setFrame(current_frame_bak)
 
+                # Init an empty FF structure
+                self.ff = FFMimickInterface(self.nrows, self.ncols, self.fr_chunk_no, np.uint8)
+
+                # Store maxpixel selections, avepixels, stdpixels
+                maxpixel_list = []
+                avepixel_list = []
+                stdpixel_list = []
+
+                # Read the FF files that have to read and reconstruct the frames
+                for file_name, frame_range in zip(ffs_to_read, frame_ranges):
+
+                    # Compute the range of frames to read
+                    min_frame = np.min(frame_range)
+                    max_frame = np.max(frame_range)
+
+                    # Read the FF file
+                    ff = readFF(self.dir_path, file_name)
+
+                    # Reconstruct the maxpixel in the given frame range
+                    maxpixel = selectFFFrames(ff.maxpixel, ff, min_frame, max_frame)
+
+                    # Reconstruct the avepixel in the given frame range
+                    avepixel = selectFFFrames(ff.avepixel, ff, min_frame, max_frame)
+
+                    # Store the computed frames
+                    maxpixel_list.append(maxpixel)
+                    avepixel_list.append(avepixel)
+                    stdpixel_list.append(ff.stdpixel)
+
+
+                # Immidiately extract the appropriate frames
+                if len(maxpixel_list) == 1:
+
+                    self.ff.maxpixel = maxpixel_list[0]
+                    self.ff.avepixel = avepixel_list[0]
+                    self.ff.stdpixel = stdpixel_list[0]
+
+                # Otherwise, compute the combined FF
+                else:
+                    maxpixel_list = np.array(maxpixel_list)
+                    avepixel_list = np.array(avepixel_list)
+                    stdpixel_list = np.array(stdpixel_list)
+
+                    self.ff.maxpixel = np.max(maxpixel_list, axis=0)
+
+                    # The maximum of the avepixel is taken because only the frame range of avepixel is taken
+                    self.ff.avepixel = np.max(avepixel_list, axis=0)
+
+                    self.ff.stdpixel = np.max(stdpixel_list, axis=0)
+
+
+        # Set the fixed dtype of uint8 to the FF
+        self.ff.dtype = np.uint8
                 
         # Store the loaded file to cache for faster loading
         self.cache = {}
@@ -437,7 +380,7 @@ class InputTypeFF(object):
         return self.ff
 
 
-    def name(self):
+    def name(self, beginning=None):
         """ Return the name of the FF file. """
 
         return self.current_ff_file
@@ -504,11 +447,25 @@ class InputTypeFF(object):
         return frame
 
 
-    def currentFrameTime(self, dt_obj=False):
+    def getSequenceNumber(self):
+        """ Returns the frame sequence number for the current frame. For FF file this is just the frame
+            number.
+
+        Return:
+            [int] Frame sequence number.
+        """
+
+        return self.current_frame
+
+
+    def currentFrameTime(self, frame_no=None, dt_obj=False):
         """ Return the time of the frame. """
 
+        if frame_no is None:
+            frame_no = self.current_frame
+
         # Compute the datetime of the current frame
-        dt = self.beginning_datetime + datetime.timedelta(seconds=self.current_frame/self.fps)
+        dt = self.beginning_datetime + datetime.timedelta(seconds=frame_no/self.fps)
         
         if dt_obj:
             return dt
@@ -520,7 +477,7 @@ class InputTypeFF(object):
 
 
 class InputTypeVideo(object):
-    def __init__(self, dir_path, config, beginning_time=None):
+    def __init__(self, dir_path, config, beginning_time=None, detection=False):
         """ Input file type handle for video files.
         
         Arguments:
@@ -529,6 +486,8 @@ class InputTypeVideo(object):
 
         Keyword arguments:
             beginning_time: [datetime] datetime of the beginning of the video. Optional, None by default.
+            detection: [bool] Indicates that the input is used for detection. False by default. This will
+                control whether the binning is applied or not.
 
         """
 
@@ -539,6 +498,8 @@ class InputTypeVideo(object):
         self.dir_path, self.file_name = os.path.split(dir_path)
         
         self.config = config
+
+        self.ff = None
 
         # This type of input probably won't have any calstars files
         self.require_calstars = False
@@ -563,6 +524,8 @@ class InputTypeVideo(object):
             self.beginning_datetime = beginning_time
 
 
+        self.detection = detection
+
 
         print('Using video file:', self.file_path)
 
@@ -582,6 +545,11 @@ class InputTypeVideo(object):
         # Get the image size
         self.nrows = int(self.cap.get(4))
         self.ncols = int(self.cap.get(3))
+
+        # Apply the binning if the detection is used
+        if self.detection:
+            self.nrows = self.nrows//self.config.detection_binning_factor
+            self.ncols = self.ncols//self.config.detection_binning_factor
 
         print('FPS:', self.fps)
         print('Total frames:', self.total_frames)
@@ -671,7 +639,7 @@ class InputTypeVideo(object):
 
 
         # Init making the FF structure
-        ff_struct_fake = FFMimickInterface(self.nrows, self.ncols, frames_to_read, np.uint8)
+        ff_struct_fake = FFMimickInterface(self.nrows, self.ncols, np.uint8)
 
         # If there are no frames to read, return an empty array
         if frames_to_read == 0:
@@ -690,30 +658,45 @@ class InputTypeVideo(object):
             # Convert frame to grayscale
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-            # Add frame for FF processing
-            ff_struct_fake.addFrame(frame)
+            # Bin the frame
+            if self.detection and (self.config.detection_binning_factor > 1):
+                frame = Image.binImage(frame, self.config.detection_binning_factor, \
+                    self.config.detection_binning_method)
 
+            # Add frame for FF processing
+            ff_struct_fake.addFrame(frame.astype(np.uint16))
+
+
+        self.current_fr_chunk_size = i + 1
 
         # Finish making the fake FF file
         ff_struct_fake.finish()
-
-        print(i)
-        self.current_fr_chunk_size = i + 1
-
 
         # Store the FF struct to cache to avoid recomputing
         self.cache = {}
 
         self.cache[cache_id] = [ff_struct_fake, self.current_fr_chunk_size]
 
+        # Set the computed chunk as the current FF
+        self.ff = ff_struct_fake
+
         return ff_struct_fake
         
 
 
-    def name(self):
-        """ Return the name of the chunk, which is just the time of the middle of the current frame chunk. """
+    def name(self, beginning=False):
+        """ Return the name of the chunk, which is just the time of the middle of the current frame chunk. 
+            Alternatively, the beginning of the whole file can be returned.
 
-        return str(self.currentTime(dt_obj=True))
+        Keyword arguments:
+            beginning: [bool] If True, the beginning time of the file will be retunred instead of the middle
+                time of the chunk.
+        """
+
+        if beginning:
+            return str(self.beginning_datetime)
+        else:
+            return str(self.currentTime(dt_obj=True))
 
 
     def currentTime(self, dt_obj=False):
@@ -768,14 +751,33 @@ class InputTypeVideo(object):
         # Convert frame to grayscale
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
+        # Bin the frame
+        if self.detection and (self.config.detection_binning_factor > 1):
+            frame = Image.binImage(frame, self.config.detection_binning_factor, \
+                self.config.detection_binning_method)
+
         return frame
 
 
-    def currentFrameTime(self, dt_obj=False):
+    def getSequenceNumber(self):
+        """ Returns the frame sequence number for the current frame. For video files this is just the frame
+            number.
+
+        Return:
+            [int] Frame sequence number.
+        """
+
+        return self.current_frame
+
+
+    def currentFrameTime(self, frame_no=None, dt_obj=False):
         """ Return the time of the frame. """
 
+        if frame_no is None:
+            frame_no = self.current_frame
+
         # Compute the datetime of the current frame
-        dt = self.beginning_datetime + datetime.timedelta(seconds=self.current_frame/self.fps)
+        dt = self.beginning_datetime + datetime.timedelta(seconds=frame_no/self.fps)
         
         if dt_obj:
             return dt
@@ -789,24 +791,31 @@ class InputTypeVideo(object):
 
 
 class InputTypeUWOVid(object):
-    def __init__(self, dir_path, config):
+    def __init__(self, dir_path, config, detection=False):
         """ Input file type handle for UWO .vid files.
         
         Arguments:
             dir_path: [str] Path to the vid file.
             config: [ConfigStruct object]
 
+        Keyword arguments:
+            detection: [bool] Indicates that the input is used for detection. False by default. This will
+                control whether the binning is applied or not.
+
         """
 
         self.input_type = 'vid'
-
-
 
         # Separate directory path and file name
         self.vid_path = dir_path
         self.dir_path, vid_file = os.path.split(dir_path)
 
         self.config = config
+
+        self.detection = detection
+
+
+        self.ff = None
 
         # This type of input probably won't have any calstars files
         self.require_calstars = False
@@ -841,6 +850,11 @@ class InputTypeUWOVid(object):
         self.nrows = self.vidinfo.ht
         self.ncols = self.vidinfo.wid
 
+        # Apply the binning if the detection is used
+        if self.detection:
+            self.nrows = self.nrows//self.config.detection_binning_factor
+            self.ncols = self.ncols//self.config.detection_binning_factor
+
 
         # Set the number of frames to be used for averaging and maxpixels
         self.fr_chunk_no = 128
@@ -854,6 +868,9 @@ class InputTypeUWOVid(object):
 
 
         self.cache = {}
+
+        # Init the dictionary for storing unix times of corresponding frames that were already loaded
+        self.utime_frame_dict = {}
 
         # Do the initial load
         self.loadChunk()
@@ -929,30 +946,46 @@ class InputTypeUWOVid(object):
         self.vid_file.seek(first_frame*self.vidinfo.seqlen)
 
         # Init making the FF structure
-        ff_struct_fake = FFMimickInterface(self.nrows, self.ncols, frames_to_read, np.uint16)
+        ff_struct_fake = FFMimickInterface(self.nrows, self.ncols, np.uint16)
 
         self.frame_chunk_unix_times = []
 
         # Load the chunk of frames
         for i in range(frames_to_read):
 
-            frame = readVidFrame(self.vid, self.vid_file).astype(np.uint16)
-
+            try:
+                frame = readVidFrame(self.vid, self.vid_file)
+            except:
+                frame = None
+            
             # If the end of the vid file was reached, stop the loop
             if frame is None:
                 break
 
+            frame = frame.astype(np.uint16)
+
+            # Bin the frame
+            if self.detection and (self.config.detection_binning_factor > 1):
+                frame = Image.binImage(frame, self.config.detection_binning_factor, \
+                    self.config.detection_binning_method)
+
+            unix_time = self.vid.ts + self.vid.tu/1000000.0
+
             # Add the unix time to list
-            self.frame_chunk_unix_times.append(self.vid.ts + self.vid.tu/1000000.0)
+            self.frame_chunk_unix_times.append(unix_time)
 
-            # Add frame for FF processing
-            ff_struct_fake.addFrame(frame)
+            # Add frame for FF processing (the frame should already be uint16)
+            ff_struct_fake.addFrame(frame)            
 
+            unix_time_lst = (self.vid.ts, self.vid.tu)
+            if unix_time_lst not in self.utime_frame_dict:
+                self.utime_frame_dict[first_frame + i] = unix_time_lst
+
+
+        self.current_fr_chunk_size = i + 1
 
         # Finish making the fake FF file
         ff_struct_fake.finish()
-
-        self.current_fr_chunk_size = i + 1
 
         # Store the FF struct to cache to avoid recomputing
         self.cache = {}
@@ -960,14 +993,26 @@ class InputTypeUWOVid(object):
         # Save the computed FF to cache
         self.cache[cache_id] = [ff_struct_fake, self.frame_chunk_unix_times, self.current_fr_chunk_size]
 
+        # Set the computed chunk as the current FF
+        self.ff = ff_struct_fake
+
         return ff_struct_fake
         
 
 
-    def name(self):
-        """ Return the name of the chunk, which is just the time of the middle of the current frame chunk. """
+    def name(self, beginning=False):
+        """ Return the name of the chunk, which is just the time of the middle of the current frame chunk. 
+            Alternatively, the beginning of the whole file can be returned.
 
-        return str(self.currentTime(dt_obj=True))
+        Keyword arguments:
+            beginning: [bool] If True, the beginning time of the file will be retunred instead of the middle
+                time of the chunk.
+        """
+
+        if beginning:
+            return str(self.beginning_datetime)
+        else:
+            return str(self.currentTime(dt_obj=True))
 
 
     def currentTime(self, dt_obj=False):
@@ -1013,17 +1058,65 @@ class InputTypeUWOVid(object):
         # Load a frame
         frame = readVidFrame(self.vid, self.vid_file)
 
+        # Bin the frame
+        if self.detection and (self.config.detection_binning_factor > 1):
+            frame = Image.binImage(frame, self.config.detection_binning_factor, \
+                self.config.detection_binning_method)
+
         # Save the frame time
         self.current_frame_time = unixTime2Date(self.vid.ts, self.vid.tu, dt_obj=True) 
+
+        unix_time_lst = (self.vid.ts, self.vid.tu)
+        if unix_time_lst not in self.utime_frame_dict:
+            self.utime_frame_dict[self.current_frame] = unix_time_lst
 
         return frame
 
 
+    def getSequenceNumber(self):
+        """ Returns the frame sequence number for the current frame. For vid files this is the frame number
+            since the beginning of the recording.
 
-    def currentFrameTime(self, dt_obj=False):
+        Return:
+            [int] Frame sequence number.
+        """
+
+        return self.vid.seq
+
+
+    def currentFrameTime(self, frame_no=None, dt_obj=False):
         """ Return the time of the frame. """
         
-        dt = self.current_frame_time
+        if frame_no is None:
+            dt = self.current_frame_time
+
+
+        else:
+
+            # If the frame number was given, read it from the dictionary or from the file
+            if frame_no in self.utime_frame_dict:
+                dt = unixTime2Date(*self.utime_frame_dict[frame_no], dt_obj=True)
+
+
+            else:
+
+                # Set the vid file to the right frame
+                self.vid_file.seek(frame_no*self.vidinfo.seqlen)
+
+                # Read the vid file metadata
+                readVidFrame(self.vid, self.vid_file)
+
+                # Store the current time to the dictionary
+                unix_time_lst = (self.vid.ts, self.vid.tu)
+                if unix_time_lst not in self.utime_frame_dict:
+                    self.utime_frame_dict[frame_no] = unix_time_lst
+
+
+                # Revert the vid file pointer to the current frame in the image handle
+                self.vid_file.seek((self.current_frame + 1)*self.vidinfo.seqlen)
+
+                dt = unixTime2Date(*unix_time_lst, dt_obj=True)
+
 
         if dt_obj:
             return dt
@@ -1036,12 +1129,19 @@ class InputTypeUWOVid(object):
 
 
 class InputTypeImages(object):
-    def __init__(self, dir_path, config, beginning_time=None, fps=None):
+    def __init__(self, dir_path, config, beginning_time=None, fps=None, detection=False):
         """ Input file type handle for a folder with images.
         
         Arguments:
             dir_path: [str] Path to the vid file.
             config: [ConfigStruct object]
+
+        Keyword arguments:
+            beginning_time: [datetime] datetime of the beginning of the video. Optional, None by default.
+            fps: [float] Known FPS of the images. None by default, in which case it will be read from the
+                config file.
+            detection: [bool] Indicates that the input is used for detection. False by default. This will
+                control whether the binning is applied or not.
 
         """
 
@@ -1050,8 +1150,15 @@ class InputTypeImages(object):
         self.dir_path = dir_path
         self.config = config
 
+        self.detection = detection
+
+        self.ff = None
+
         # This type of input probably won't have any calstars files
         self.require_calstars = False
+
+        # Disctionary which holds the time of every frame, used for fast frame time lookup
+        self.uwo_png_dt_dict = {}
 
 
         ### Find images in the given folder ###
@@ -1068,7 +1175,7 @@ class InputTypeImages(object):
 
                     # Don't take flats, biases, darks, etc.
                     if ('flat' in file_name.lower()) or ('dark' in file_name.lower()) \
-                        or ('bias' in file_name.lower()):
+                        or ('bias' in file_name.lower()) or ('grid' in file_name.lower()):
                             continue
 
                     self.img_list.append(file_name)
@@ -1115,7 +1222,7 @@ class InputTypeImages(object):
         self.uwo_png_dt_list = None
 
 
-        # Check if the beginning time was given
+        # Check if the beginning time was given (it will be read from the PNG if the UWO format is given)
         if beginning_time is None:
             
             try:
@@ -1146,13 +1253,13 @@ class InputTypeImages(object):
         # Load the first image
         img = self.loadFrame()
 
-        # Get the image size
+        # Get the image size (the binning correction doesn't have to be applied because the image is already
+        #   binned)
         self.nrows = img.shape[0]
         self.ncols = img.shape[1]
 
         # Get the image dtype
         self.img_dtype = img.dtype
-
 
         # Set the number of frames to be used for averaging and maxpixels
         self.fr_chunk_no = 64
@@ -1176,7 +1283,7 @@ class InputTypeImages(object):
         if self.uwo_png_mode:
 
             # Convert datetimes to Unix times
-            unix_times = [(dt - datetime.datetime(1970, 1, 1)).total_seconds() for dt in self.uwo_png_dt_list]
+            unix_times = [datetime2UnixTime(dt) for dt in self.uwo_png_dt_list]
 
             fps = 1/((unix_times[-1] - unix_times[0])/self.current_fr_chunk_size)
 
@@ -1254,7 +1361,7 @@ class InputTypeImages(object):
 
 
         # Init making the FF structure
-        ff_struct_fake = FFMimickInterface(self.nrows, self.ncols, frames_to_read, self.img_dtype)
+        ff_struct_fake = FFMimickInterface(self.nrows, self.ncols, self.img_dtype)
 
         self.uwo_png_dt_list = []
 
@@ -1272,23 +1379,26 @@ class InputTypeImages(object):
             frame = self.loadFrame(fr_no=img_indx)
 
             # Add frame for FF processing
-            ff_struct_fake.addFrame(frame)
+            ff_struct_fake.addFrame(frame.astype(np.uint16))
 
             # Add the datetime of the frame to list of the UWO png is used
             if self.uwo_png_mode:
-                self.uwo_png_dt_list.append(self.currentFrameTime(dt_obj=True))
+                self.uwo_png_dt_list.append(self.currentFrameTime(frame_no=img_indx, dt_obj=True))
 
+
+        self.current_fr_chunk_size = i
 
         # Finish making the fake FF file
         ff_struct_fake.finish()
-
-        self.current_fr_chunk_size = i
 
 
         # Store the FF struct to cache to avoid recomputing
         self.cache = {}
 
         self.cache[cache_id] = [ff_struct_fake, self.uwo_png_dt_list, self.current_fr_chunk_size]
+
+        # Set the computed chunk as the current FF
+        self.ff = ff_struct_fake
 
         return ff_struct_fake
     
@@ -1323,7 +1433,7 @@ class InputTypeImages(object):
     
         Keyword arguments:
             avepixel: [bool] Does nothing, just for function interface consistency with other input types.
-            fr_no: [int] Load a specific frame. None by defualt, then the current frame will be loaded.
+            fr_no: [int] Load a specific frame. None by default, then the current frame will be loaded.
         """
 
 
@@ -1333,37 +1443,70 @@ class InputTypeImages(object):
 
         else:
             current_img_file = self.current_img_file
+            fr_no = self.current_frame
 
         # Get the current image
-        img = cv2.imread(os.path.join(self.dir_path, current_img_file), -1)
+        frame = cv2.imread(os.path.join(self.dir_path, current_img_file), -1)
 
         # Convert the image to black and white if it's 8 bit
-        if 8*img.itemsize == 8:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        if 8*frame.itemsize == 8:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
 
-        
+        # If UWO PNG's are used, byteswap the image and read the image time
         if self.uwo_png_mode:
 
             # Byteswap if it's the UWO style png
-            img = img.byteswap()
+            frame = frame.byteswap()
 
             # Read the time from the image
-            ts = img[0][6] + (img[0][7] << 16)
-            tu = img[0][8] + (img[0][9] << 16)
-
-            self.uwo_png_frame_time = unixTime2Date(ts, tu, dt_obj=True)
+            ts = frame[0][6] + (frame[0][7] << 16)
+            tu = frame[0][8] + (frame[0][9] << 16)
 
 
-        return img
+            frame_dt = unixTime2Date(ts, tu, dt_obj=True)
+
+            self.uwo_png_frame_time = frame_dt
+
+            # Save the frame time of the current frame
+            if fr_no not in self.uwo_png_dt_dict:
+                self.uwo_png_dt_dict[fr_no] = frame_dt
 
 
+        # Bin the frame
+        if self.detection and (self.config.detection_binning_factor > 1):
+            frame = Image.binImage(frame, self.config.detection_binning_factor, \
+                self.config.detection_binning_method)
 
 
-    def name(self):
-        """ Return the name of the chunk, which is just the time of the middle of the current frame chunk. """
+        return frame
 
-        return str(self.currentTime(dt_obj=True))
+
+    def getSequenceNumber(self):
+        """ Returns the frame sequence number for the current frame. For a stream of images this is just the 
+            image index.
+
+        Return:
+            [int] Frame sequence number.
+        """
+
+        return self.current_frame
+
+
+    def name(self, beginning=False):
+        """ Return the name of the chunk, which is just the time of the middle of the current frame chunk. 
+            Alternatively, the beginning of the whole file can be returned.
+
+        Keyword arguments:
+            beginning: [bool] If True, the beginning time of the file will be retunred instead of the middle
+                time of the chunk.
+        """
+
+        if beginning:
+            return str(self.beginning_datetime)
+
+        else:
+            return str(self.currentTime(dt_obj=True))
 
 
     def currentTime(self, dt_obj=False):
@@ -1373,7 +1516,7 @@ class InputTypeImages(object):
         if self.uwo_png_mode:
 
             # Convert datetimes to Unix times
-            unix_times = [(dt - datetime.datetime(1970, 1, 1)).total_seconds() for dt in self.uwo_png_dt_list]
+            unix_times = [datetime2UnixTime(dt) for dt in self.uwo_png_dt_list]
 
             # Compute the mean of unix times
             unix_mean = np.mean(unix_times)
@@ -1400,18 +1543,45 @@ class InputTypeImages(object):
 
 
 
-    def currentFrameTime(self, dt_obj=False):
+    def currentFrameTime(self, frame_no=None, dt_obj=False):
         """ Return the time of the frame. """
+
+        if frame_no is None:
+            frame_no = self.current_frame
+
 
         # If the UWO png is used, return the time read from the PNG
         if self.uwo_png_mode:
+
+            # If the frame number is not given, return the time of the current frame
+            if frame_no is None:
+
+                dt = self.uwo_png_frame_time
+
+
+            # Otherwise, load the frame time
+            else:
+
+                # If the frame number is not in the dictionary, load the frame and read the time from it
+                if frame_no not in self.uwo_png_dt_dict:
+
+                    current_frame_backup = self.current_frame
+
+                    # Load the time from the given frame
+                    self.loadFrame(fr_no=frame_no)
+
+                    # Load back the current frame
+                    self.loadFrame(fr_no=current_frame_backup)
+                    
+
+                # Read the frame time from the dictionary
+                dt = self.uwo_png_dt_dict[frame_no]
             
-            dt = self.uwo_png_frame_time
 
         else:
 
             # Compute the datetime of the current frame
-            dt = self.beginning_datetime + datetime.timedelta(seconds=self.current_frame/self.fps)
+            dt = self.beginning_datetime + datetime.timedelta(seconds=frame_no/self.fps)
             
 
 
@@ -1424,7 +1594,7 @@ class InputTypeImages(object):
 
 
 
-def detectInputType(input_path, config, beginning_time=None, fps=None, skip_ff_dir=False):
+def detectInputType(input_path, config, beginning_time=None, fps=None, skip_ff_dir=False, detection=False):
     """ Given the folder of a file, detect the input format.
 
     Arguments:
@@ -1434,9 +1604,12 @@ def detectInputType(input_path, config, beginning_time=None, fps=None, skip_ff_d
     Keyword arguments:
         beginning_time: [datetime] Datetime of the video beginning. Optional, only can be given for
             video input formats.
-        fps: [float] Frames per second, used only when images in a folder are used.
+        fps: [float] Frames per second, used only when images in a folder are used. If it's not given,
+            it will be read from the config file.
         skip_ff_dir: [bool] Skip the input type where there are multiple FFs in the same directory. False
             by default. This is only used for ManualReduction.
+        detection: [bool] Indicates that the input is used for detection. False by default. This will
+                control whether the binning is applied or not. No effect on FF image handle.
 
     """
 
@@ -1456,7 +1629,8 @@ def detectInputType(input_path, config, beginning_time=None, fps=None, skip_ff_d
 
         # If not, check if there any image files in the folder
         else:
-            img_handle = InputTypeImages(input_path, config, beginning_time=beginning_time, fps=fps)
+            img_handle = InputTypeImages(input_path, config, beginning_time=beginning_time, fps=fps, \
+                detection=detection)
 
 
     # If the given path is a file, look for a single FF file, video files, or vid files
@@ -1467,7 +1641,7 @@ def detectInputType(input_path, config, beginning_time=None, fps=None, skip_ff_d
         # Check if a single FF file was given
         if validFFName(file_name):
 
-            # Init the image handle for FF a single FF files
+            # Init the image handle for FF a single FF file
             img_handle = InputTypeFF(input_path, config, single_ff=True)
 
 
@@ -1475,14 +1649,15 @@ def detectInputType(input_path, config, beginning_time=None, fps=None, skip_ff_d
         elif file_name.endswith('.mp4') or file_name.endswith('.avi') or file_name.endswith('.mkv'):
 
             # Init the image hadle for video files
-            img_handle = InputTypeVideo(input_path, config, beginning_time=beginning_time)
+            img_handle = InputTypeVideo(input_path, config, beginning_time=beginning_time, \
+                detection=detection)
 
 
         # Check if the given files is the UWO .vid format
         elif file_name.endswith('.vid'):
             
             # Init the image handle for UWO-type .vid files
-            img_handle = InputTypeUWOVid(input_path, config)
+            img_handle = InputTypeUWOVid(input_path, config, detection=detection)
 
 
         else:
@@ -1522,28 +1697,68 @@ if __name__ == "__main__":
     # Load the configuration file
     config = cr.parse(".config")
 
-    # Load the appropriate files
-    img_handle = detectInputType(cml_args.dir_path[0], config)
 
-    chunk_size = 64
+    # Test creating a fake FF
+    nframes = 64
+    img_h = 20
+    img_w = 20
 
-    for i in range(img_handle.total_frames//chunk_size + 1):
+    ff = FFMimickInterface(img_h, img_w, np.uint16)
+
+    frames = np.random.normal(10000, 500, size=(nframes, img_h, img_w)).astype(np.uint16)
+
+    for frame in frames:
+
+        ff.addFrame(frame.astype(np.uint16))
+
+
+    ff.finish()
+
+
+    # Compute real values
+    avepixel = np.mean(frames, axis=0)
+    stdpixel = np.std(frames, axis=0)
+
+
+    print('Std mean ff:', np.mean(ff.stdpixel))
+    print('Std mean:', np.mean(stdpixel))
+    print('Mean diff:', np.mean(stdpixel - ff.stdpixel))
+    plt.imshow(stdpixel - ff.stdpixel)
+    plt.show()
+
+
+    print('ave mean ff:', np.mean(ff.avepixel))
+    print('ave mean:', np.mean(avepixel))
+    print('Mean diff:', np.mean(avepixel - ff.avepixel))
+    plt.imshow(avepixel - ff.avepixel)
+    plt.show()
+
         
-        first_frame = i*chunk_size
-
-        # Load a chunk of frames
-        ff = img_handle.loadChunk(first_frame=first_frame, read_nframes=chunk_size)
-
-        print(first_frame, first_frame + chunk_size)
-        plt.imshow(ff.maxpixel - ff.avepixel, cmap='gray')
-        plt.show()
 
 
-        # Show stdpixel
-        plt.imshow(ff.stdpixel, cmap='gray')
-        plt.show()
 
-        # Show thresholded image
-        thresh_img = (ff.maxpixel - ff.avepixel) > (1.0*ff.stdpixel + 30)
-        plt.imshow(thresh_img, cmap='gray')
-        plt.show()
+    # # Load the appropriate files
+    # img_handle = detectInputType(cml_args.dir_path[0], config)
+
+    # chunk_size = 64
+
+    # for i in range(img_handle.total_frames//chunk_size + 1):
+        
+    #     first_frame = i*chunk_size
+
+    #     # Load a chunk of frames
+    #     ff = img_handle.loadChunk(first_frame=first_frame, read_nframes=chunk_size)
+
+    #     print(first_frame, first_frame + chunk_size)
+    #     plt.imshow(ff.maxpixel - ff.avepixel, cmap='gray')
+    #     plt.show()
+
+
+    #     # Show stdpixel
+    #     plt.imshow(ff.stdpixel, cmap='gray')
+    #     plt.show()
+
+    #     # Show thresholded image
+    #     thresh_img = (ff.maxpixel - ff.avepixel) > (1.0*ff.stdpixel + 30)
+    #     plt.imshow(thresh_img, cmap='gray')
+    #     plt.show()

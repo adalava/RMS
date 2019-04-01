@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+
 import os
 import time
 import logging
@@ -22,12 +23,6 @@ from math import floor
 
 import numpy as np
 import multiprocessing
-
-try:
-    from mem_top import mem_top
-    USE_MEMTOP = True
-except:
-    USE_MEMTOP = False
 
 
 from RMS.VideoExtraction import Extractor
@@ -90,7 +85,7 @@ class Compressor(multiprocessing.Process):
     running = False
     
     def __init__(self, data_dir, array1, startTime1, array2, startTime2, config, detector=None, 
-        live_view=None, flat_struct=None):
+        live_view=None):
         """
 
         Arguments:
@@ -105,7 +100,6 @@ class Compressor(multiprocessing.Process):
                 meteor detection.
             live_view: [LiveViewer object] Handle to the LiveViewer object which will show in real time 
                 the latest maxpixel on the screen.
-            flat_struct: [Flat struct] Structure containing the flat field. None by default.
 
         """
         
@@ -120,7 +114,6 @@ class Compressor(multiprocessing.Process):
 
         self.detector = detector
         self.live_view = live_view
-        self.flat_struct = flat_struct
 
         self.exit = multiprocessing.Event()
 
@@ -306,10 +299,6 @@ class Compressor(multiprocessing.Process):
             # Save the extracted intensitites per every field
             FieldIntensities.saveFieldIntensitiesBin(field_intensities, self.data_dir, filename)
 
-            # # Log memory
-            # if USE_MEMTOP:
-            #     log.debug(mem_top())
-
             # Run the extractor
             if self.config.enable_fireball_detection:
                 extractor = Extractor(self.config, self.data_dir)
@@ -327,7 +316,7 @@ class Compressor(multiprocessing.Process):
             if self.detector is not None:
 
                 # Add the file to the detector queue
-                self.detector.addJob([self.data_dir, filename, self.config, self.flat_struct])
+                self.detector.addJob([self.data_dir, filename, self.config])
                 log.info('Added file for detection: {:s}'.format(filename))
 
 

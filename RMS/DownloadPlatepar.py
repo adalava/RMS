@@ -20,8 +20,8 @@ log = logging.getLogger("logger")
 def downloadNewPlatepar(config, port=22):
     """ Connect to the central server and download a new platepar calibration file, if available. """
 
-
-    log.info('Establishing SSH connection to: ' + config.hostname + ':' + str(port) + '...')
+    log.info('Checking for new platepar on the server...')
+    log.debug('Establishing SSH connection to: ' + config.hostname + ':' + str(port) + '...')
 
     try:
         # Connect to host
@@ -112,11 +112,14 @@ if __name__ == "__main__":
             self.platepar_name = 'platepar_cmn2010.cal'
             self.platepar_remote_name = 'platepar_latest.cal'
 
+            self.data_dir = os.path.join(os.path.expanduser('~'), 'RMS_data')
+            self.log_dir = 'logs'
+
 
     config = FakeConf()
 
     # Init the logger
-    initLogging()
+    initLogging(config)
 
 
     # Test platepar downloading

@@ -32,6 +32,7 @@ import datetime
 import numpy as np
 
 from RMS.Astrometry.Conversions import date2JD, jd2Date
+import RMS.Astrometry.ApplyAstrometry
 
 class stationData(object):
     """ Holds information about one meteor station (location) and observed points.
@@ -119,11 +120,12 @@ class Platepar(object):
         self.RA_d = self.RA_H = self.RA_M = self.RA_S = 0
         self.dec_d = self.dec_D = self.dec_M = self.dec_S = 0
         self.pos_angle_ref = 0
+        self.rotation_from_horiz = 0
 
         self.az_centre = 0
         self.alt_centre = 0
 
-        # FOV scale
+        # FOV scale (px/deg)
         self.F_scale = 1.0
 
         # Photometry calibration
@@ -137,6 +139,9 @@ class Platepar(object):
         self.y_poly_fwd = np.zeros(shape=(12,), dtype=np.float64)
         self.x_poly_rev = np.zeros(shape=(12,), dtype=np.float64)
         self.y_poly_rev = np.zeros(shape=(12,), dtype=np.float64)
+
+        self.x_poly = self.x_poly_fwd
+        self.y_poly = self.y_poly_fwd
 
         # Set the first coeffs to 0.5, as that is the real centre of the FOV
         self.x_poly_fwd[0] = 0.5
@@ -211,10 +216,9 @@ class Platepar(object):
             # Parse JSON into an object with attributes corresponding to dict keys
             self.__dict__ = json.loads(data)
 
-
             # Add the version if it was not in the platepar (v1 platepars didn't have a version)
             if not 'version' in self.__dict__:
-                self.gamma = 1
+                self.version = 1
 
             # Add UT correction if it was not in the platepar
             if not 'UT_corr' in self.__dict__:
@@ -224,11 +228,9 @@ class Platepar(object):
             if not 'gamma' in self.__dict__:
                 self.gamma = 1.0
 
-
             # Add the list of calibration stars if it was not in the platepar
             if not 'star_list' in self.__dict__:
                 self.star_list = []
-
 
             # If v1 only the backward distorsion coeffs were fitted, so use load them for both forward and
             #   reverse if nothing else is available
@@ -245,6 +247,15 @@ class Platepar(object):
             self.x_poly_rev = np.array(self.x_poly_rev)
             self.y_poly_fwd = np.array(self.y_poly_fwd)
             self.y_poly_rev = np.array(self.y_poly_rev)
+
+            # Set polynomial parameters used by the old code
+            self.x_poly = self.x_poly_fwd
+            self.y_poly = self.y_poly_fwd
+
+
+            # Add rotation from horizontal
+            if not 'rotation_from_horiz' in self.__dict__:
+                self.rotation_from_horiz = RMS.Astrometry.ApplyAstrometry.rotationWrtHorizon(self)
 
             # Calculate the datetime
             self.time = jd2Date(self.JD, dt_obj=True)

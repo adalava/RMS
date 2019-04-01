@@ -8,6 +8,128 @@ import math
 import numpy as np
 import scipy.misc
 
+from RMS.Decorators import memoizeSingle
+
+# Cython init
+import pyximport
+pyximport.install(setup_args={'include_dirs':[np.get_include()]})
+import RMS.Routines.MorphCy as morph
+from RMS.Routines.BinImageCy import binImage as binImageCy
+
+
+def binImage(img, bin_factor, method='avg'):
+    """ Bin the given image. The binning has to be a factor of 2, e.g. 2, 4, 8, etc.
+    This is just a wrapper function for a cythonized function that does the binning.
+    
+    Arguments:
+        img: [ndarray] Numpy array representing an image.
+        bin_factor: [int] The binning factor. Has to be a factor of 2 (e.g. 2, 4, 8).
+
+    Keyword arguments:
+        method: [str] Binning method.  'avg' by default.
+            - 'sum' will sum all values in the binning window and assign it to the new pixel.
+            - 'avg' will take the average.
+
+    Return:
+        out_img: [ndarray] Binned image.
+    """
+
+    input_type = img.dtype
+
+    # Make sure the input image is of the correct type
+    if img.dtype != np.uint16:
+        img = img.astype(np.uint16)
+    
+    # Perform the binning
+    img = binImageCy(img, bin_factor, method=method)
+
+    # Convert the image back to the input type
+    img = img.astype(input_type)
+
+    return img
+
+
+
+def thresholdImg(img, avepixel, stdpixel, k1, j1, ff=False, mask=None, mask_ave_bright=True):
+    """ Threshold the image with given parameters.
+    
+    Arguments:
+        img: [2D ndarray]
+        avepixel: [2D ndarray]
+        stdpixel: [2D ndarray]
+        k1: [float] relative thresholding factor (how many standard deviations above mean the maxpixel image 
+            should be)
+        j1: [float] absolute thresholding factor (how many minimum abuolute levels above mean the maxpixel 
+            image should be)
+
+    Keyword arguments:
+        ff: [bool] If true, it indicated that the FF file is being thresholded.
+        mask: [ndarray] Mask image. None by default.
+        mask_ave_bright: [bool] Mask out regions that are 5 sigma brighter in avepixel than the mean.
+            This gets rid of very bright stars, saturating regions, static bright parts, etc.
+    
+    Return:
+        [ndarray] thresholded 2D image
+    """
+
+    # If the FF file is used, then values in max will always be larger than values in average
+    if ff:
+        img_avg_sub = img - avepixel
+    else:
+        
+        # Subtract input image and average, making sure there are no values below 0 which will wrap around
+        img_avg_sub = applyDark(img, avepixel)
+
+    # Compute the thresholded image
+    img_thresh = img_avg_sub > (k1 * stdpixel + j1)
+
+
+    # Mask out regions that are very bright in avepixel
+    if mask_ave_bright:
+
+        # Compute the average saturation mask and mask out everything that's saturating in avepixel
+        ave_saturation_mask = avepixel >= np.min([np.mean(avepixel) + 5*np.std(avepixel), \
+            np.iinfo(avepixel.dtype).max])
+
+        # Dilate the mask 2 times
+        input_type = ave_saturation_mask.dtype
+        ave_saturation_mask = morph.morphApply(ave_saturation_mask.astype(np.uint8), [5, 5]).astype(input_type)
+
+        img_thresh = img_thresh & ~ave_saturation_mask
+
+
+    # If the mask was given, set all areas of the thresholded image convered by the mask to false
+    if mask is not None:
+        if img_thresh.shape == mask.img.shape:
+            img_thresh[mask.img == 0] = False
+
+    # The thresholded image is always 8 bit
+    return img_thresh.astype(np.uint8)
+
+
+@memoizeSingle
+def thresholdFF(ff, k1, j1, mask=None, mask_ave_bright=False):
+    """ Threshold the FF with given parameters.
+    
+    Arguments:
+        ff: [FF object] input FF image object on which the thresholding will be applied
+        k1: [float] relative thresholding factor (how many standard deviations above mean the maxpixel image 
+            should be)
+        j1: [float] absolute thresholding factor (how many minimum abuolute levels above mean the maxpixel 
+            image should be)
+
+    Keyword arguments:
+        mask: [ndarray] Mask image. None by default.
+        mask_ave_bright: [bool] Mask out regions that are 5 sigma brighter in avepixel than the mean.
+            This gets rid of very bright stars, saturating regions, static bright parts, etc.
+    
+    Return:
+        [ndarray] thresholded 2D image
+    """
+
+    return thresholdImg(ff.maxpixel, ff.avepixel, ff.stdpixel, k1, j1, ff=True, mask=mask, \
+        mask_ave_bright=mask_ave_bright)
+
 
 
 @np.vectorize
@@ -158,8 +280,7 @@ def adjustLevels(img_array, minv, gamma, maxv, nbits=None):
 
 
     # Convert the image back to input type
-    img_array.astype(input_type)
-        
+    img_array = img_array.astype(input_type)
 
     return img_array
 
@@ -228,9 +349,14 @@ class FlatStruct(object):
         self.flat_img[(self.flat_img < self.flat_avg/10) | (self.flat_img < 10)] = self.flat_avg
 
 
+    def binFlat(self, binning_factor, binning_method):
+        """ Bin the flat. """
 
+        # Bin the processed flat
+        self.flat_img = binImage(self.flat_img, binning_factor, binning_method)
 
-
+        # Bin the raw flat image
+        self.flat_img_raw = binImage(self.flat_img_raw, binning_factor, binning_method)
 
 
 
@@ -263,7 +389,7 @@ def loadFlat(dir_path, file_name, dtype=None, byteswap=False, dark=None):
 
     if byteswap:
         flat_img = flat_img.byteswap()
-
+        
 
     # Init a new Flat structure
     flat_struct = FlatStruct(flat_img, dark=dark)
@@ -349,7 +475,6 @@ def loadDark(dir_path, file_name, dtype=None, byteswap=False):
 
 
 
-
 def applyDark(img, dark_img):
     """ Apply the dark frame to an image. 
     
@@ -381,6 +506,8 @@ def applyDark(img, dark_img):
 
 
     return img
+
+
 
 
 

@@ -16,8 +16,10 @@
 
 from __future__ import print_function, absolute_import, division
 
+import argparse
 import logging
 from time import time
+import datetime
 import sys, os
 import ctypes
 
@@ -31,19 +33,28 @@ import matplotlib.gridspec as gridspec
 from mpl_toolkits.mplot3d import Axes3D
 
 # RMS imports
+from RMS.Astrometry.Conversions import datetime2UnixTime, jd2Date
+from RMS.Astrometry.ApplyAstrometry import XY2CorrectedRADecPP, raDec2AltAz
+import RMS.ConfigReader as cr
+from RMS.DetectionTools import getThresholdedStripe3DPoints, loadImageCalibration
+from RMS.Formats.AsgardEv import writeEv
 from RMS.Formats import FFfile
 from RMS.Formats import FTPdetectinfo
-import RMS.ConfigReader as cr
+from RMS.Formats.FrameInterface import detectInputType
+from RMS.Formats.Platepar import Platepar
+from RMS.Misc import mkdirP
 from RMS.Routines.Grouping3D import find3DLines, getAllPoints
 from RMS.Routines.CompareLines import compareLines
 from RMS.Routines import MaskImage
 from RMS.Routines import Image
 from RMS.Routines import RollingShutterCorrection
+from RMS.Routines.Image import thresholdFF
 
 # Morphology - Cython init
 import pyximport
 pyximport.install(setup_args={'include_dirs':[np.get_include()]})
 import RMS.Routines.MorphCy as morph
+from RMS.Routines.BinImageCy import binImage
 
 # If True, all detection details will be logged
 VERBOSE_DEBUG = False
@@ -63,48 +74,6 @@ def logDebug(*log_str):
 
         log.debug(" ".join(log_str))
 
-
-
-
-def thresholdImg(ff, k1, j1):
-    """ Threshold the image with given parameters.
-    
-    Arguments:
-        ff: [FF object] input FF image object on which the thresholding will be applied
-        k1: [float] relative thresholding factor (how many standard deviations above mean the maxpixel image 
-            should be)
-        j1: [float] absolute thresholding factor (how many minimum abuolute levels above mean the maxpixel 
-            image should be)
-    
-    Return:
-        [ndarray] thresholded 2D image
-    """
-
-    return ff.maxpixel - ff.avepixel > (k1 * ff.stdpixel + j1)
-
-
-
-def selectFrames(img_thres, ff, frame_min, frame_max):
-    """ Select only pixels in a given frame range. 
-    
-    Arguments:
-        img_thres: [ndarray] 2D numpy array containing the thresholded image
-        ff: [FF object] FF image object
-        frame_min: [int] first frame in a range to take
-        frame_max: [int] last frame in a range to take
-    
-    Return:
-        [ndarray] image with pixels only from the given frame range
-    """
-
-    # Get the indices of image positions with times correspondng to the subdivision
-    indices = np.where((ff.maxframe >= frame_min) & (ff.maxframe <= frame_max))
-
-    # Reconstruct the image with given indices
-    img = np.zeros((ff.nrows, ff.ncols), dtype=np.uint8)
-    img[indices] = img_thres[indices]
-
-    return img
 
 
 
@@ -141,100 +110,6 @@ def getPolarLine(x1, y1, x2, y2, img_h, img_w):
         rho = -rho
 
     return rho, np.degrees(theta)
-
-
-
-def getStripeIndices(rho, theta, stripe_width, img_h, img_w):
-    """ Get indices of the stripe centered on a line. Line parameters are in Hough Transform form.
-    
-    Arguments:
-        rho: [float] Line distance from the center in HT space (pixels).
-        theta: [float] Angle in degrees in HT space.
-        stripe_width: [int] Width of the stripe around the line.
-        img_h: [int] Original image height in pixels.
-        img_w: [int] Original image width in pixels.
-
-    Return:
-        (indicesy, indicesx): [tuple] a tuple of x and y indices of stripe pixels
-
-    """
-
-    # minimum angle offset from 90 degrees
-    angle_eps = 0.2
-
-    # Check for vertical/horizontal lines and set theta to a small angle
-    if (theta%90 < angle_eps):
-        theta = theta + angle_eps
-
-    # Normalize theta to 0-360 range
-    theta = theta%360
-
-    hh = img_h/2.0
-    hw = img_w/2.0
-
-    indicesy = []
-    indicesx = []
-     
-    if theta < 45 or (theta > 90 and theta < 135):
-
-        theta = np.radians(theta)
-        half_limit = (stripe_width/2)/np.cos(theta)
-
-        a = -np.tan(theta)
-        b = rho/np.cos(theta)
-         
-        for y in range(int(-hh), int(hh)):
-
-            x0 = a*y + b
-             
-            x1 = int(x0 - half_limit + hw)
-            x2 = int(x0 + half_limit + hw)
-             
-            if x1 > x2:
-                x1, x2 = x2, x1
-             
-            if x2 < 0 or x1 >= img_w:
-                continue
-            
-            for x in range(x1, x2):
-                if x < 0 or x >= img_w:
-                    continue
-                 
-                indicesy.append(y + hh)
-                indicesx.append(x)
-                 
-    else:
-
-        theta = np.radians(theta)
-        half_limit = (stripe_width/2)/np.sin(theta)
-
-        a = -1/np.tan(theta)
-        b = rho/np.sin(theta)
-         
-        for x in range(int(-hw), int(hw)):
-            y0 = a*x + b
-             
-            y1 = int(y0 - half_limit + hh)
-            y2 = int(y0 + half_limit + hh)
-             
-            if y1 > y2:
-                y1, y2 = y2, y1
-             
-            if y2 < 0 or y1 >= img_h:
-                continue
-                
-            for y in range(y1, y2):
-                if y < 0 or y >= img_h:
-                    continue
-                 
-                indicesy.append(y)
-                indicesx.append(x + hw)
-
-    # Convert indices to integer
-    indicesx = list(map(int, indicesx))
-    indicesy = list(map(int, indicesy))
-
-    return (indicesy, indicesx)
 
 
 
@@ -281,7 +156,7 @@ def mergeLines(line_list, min_distance, img_w, img_h, last_count=0):
         found_pair = False
 
         # Get polar coordinates of line
-        rho1, theta1 = line1[0:2]
+        rho1, theta1, min_frame1, max_frame1 = line1
 
         
 
@@ -295,7 +170,18 @@ def mergeLines(line_list, min_distance, img_w, img_h, last_count=0):
                 continue
 
             # Get polar coordinates of line
-            rho2, theta2 = line2[0:2]
+            rho2, theta2, min_frame2, max_frame2 = line2
+
+            # If the minimum frame of this line is larger than the maximum frame of the reference line
+            #   skip this loop because there is no time overlap, and we know the lines are ordered by frame
+            if min_frame2 > max_frame1:
+                break
+
+
+            # If there is no time overlap, skip this pair
+            if not ((max_frame1 >= min_frame2) and (min_frame1 <= max_frame2)):
+                continue
+
 
             # Check if the points are close enough
             if compareLines(rho1, theta1, rho2, theta2, img_w, img_h) < min_distance:
@@ -477,11 +363,34 @@ def merge3DLines(line_list, vect_angle_thresh, last_count=0):
 
 
 
-def getLines(ff, k1, j1, time_slide, time_window_size, max_lines, max_white_ratio, kht_lib_path):
+def checkWhiteRatio(img_thres, ff, max_white_ratio):
+    """ Checks if there are too many threshold passers on an image. """
+
+    # Check if the image is too "white" and any futher processing makes no sense
+    # Compute the radio between the number of threshold passers and all pixels
+    white_ratio = np.count_nonzero(img_thres)/float(ff.nrows*ff.ncols)
+
+    logDebug('white ratio: ' + str(white_ratio))
+
+    if white_ratio > max_white_ratio:
+
+        log.debug(("Too many threshold passers! White ratio is {:.2f}, which is higher than the "\
+            "max_white_ratio threshold: {:.2f}").format(white_ratio, max_white_ratio))
+
+        return False
+
+
+    return True
+
+
+
+
+def getLines(img_handle, k1, j1, time_slide, time_window_size, max_lines, max_white_ratio, kht_lib_path, \
+    mask=None, flat_struct=None, dark=None, debug=False):
     """ Get (rho, phi) pairs for each meteor present on the image using KHT.
         
     Arguments:
-        ff: [FF bin object] FF bin file loaded into the FF bin class
+        img_handle: [FrameInterface instance] Object with common interface to various input formats.
         k1: [float] weight parameter for the standard deviation during thresholding
         j1: [float] absolute threshold above average during thresholding
         time_slide: [int] subdivision size of the time axis (256 will be divided into 256/time_slide parts)
@@ -489,6 +398,10 @@ def getLines(ff, k1, j1, time_slide, time_window_size, max_lines, max_white_rati
         max_lines: [int] maximum number of lines to find by KHT
         max_white_ratio: [float] max ratio between write and all pixels after thresholding
         kht_lib_path: [string] path to the compiled KHT library
+        mask: [MaskStruct] Mask structure.
+        flat_struct: [FlatStruct]  Flat frame sturcture.
+        dark: [ndarray] Dark frame.
+
     
     Return:
         [list] a list of all found lines
@@ -510,37 +423,83 @@ def getLines(ff, k1, j1, time_slide, time_window_size, max_lines, max_white_rati
 
     line_results = []
 
-    # Threshold the image
-    img_thres = thresholdImg(ff, k1, j1)
 
-    # # Show thresholded image
-    # show("thresholded ALL", img_thres)
+    # If the input is a single FF file, threshold the image right away
+    if img_handle.input_type == 'ff':
 
+        # Threshold the FF
+        img_thres = thresholdFF(img_handle.ff, k1, j1, mask=mask)
 
-    logDebug('white ratio: ' + str(np.count_nonzero(img_thres)/float(ff.nrows*ff.ncols)))
+        # # Show thresholded image
+        # show("thresholded ALL", img_thres)
 
-    # Check if the image is too "white" and any futher processing makes no sense
-    # This checks the max percentage of white pixels in the thresholded image
-    white_ratio = np.count_nonzero(img_thres)/float(ff.nrows*ff.ncols)
-    if white_ratio > max_white_ratio:
-
-        log.debug(("Too many threshold passers! White ratio is {:.2f}, which is higher than the "\
-            "max_white_ratio threshold: {:.2f}").format(white_ratio, max_white_ratio))
-
-        return line_results
+        # Check if there are too many threshold passers, if so report that no lines were found
+        if not checkWhiteRatio(img_thres, img_handle.ff, max_white_ratio):
+            return line_results
 
 
     # Subdivide the image by time into overlapping parts (decreases noise when searching for meteors)
-    for i in range(0, int(256/time_slide - 1)):
+    for i in range(0, int(np.ceil(img_handle.total_frames/time_slide)) - 1):
 
         frame_min = i*time_slide
         frame_max = i*time_slide + time_window_size
 
-        # Select the time range of the thresholded image
-        img = selectFrames(img_thres, ff, frame_min, frame_max)
 
-        # Show thresholded image
-        # show(str(frame_min) + "-" + str(frame_max) + " threshold", img)
+        # If an FF file is used
+        if img_handle.input_type == 'ff':
+            
+            # Select the time range of the thresholded image
+            img = FFfile.selectFFFrames(img_thres, img_handle.ff, frame_min, frame_max)
+
+
+        # If not, load a range of frames and threshold it
+        else:
+
+            # Load the frame chunk
+            img_handle.loadChunk(first_frame=frame_min, read_nframes=(frame_max - frame_min + 1))
+
+            # If making the synthetic FF has failed, skip it
+            if not img_handle.ff.successful:
+                logDebug('Skipped frame range due to failed synthetic FF generation: frames {:d} to {:d}'.format(\
+                    frame_min, frame_max))
+                continue
+
+            # Print the time
+            logDebug('Time:', img_handle.name())
+
+            # Apply the mask, dark, flat
+            img_handle = preprocessFF(img_handle, mask, flat_struct, dark)
+
+            # Threshold the frame chunk
+            img = thresholdFF(img_handle.ff, k1, j1, mask=mask)
+
+            # Check if there are too many threshold passers, if so report that no lines were found
+            if not checkWhiteRatio(img, img_handle.ff, max_white_ratio):
+                continue
+
+
+        if debug:
+            ### Show maxpixel and thresholded image
+
+            if img_handle.input_type == 'ff':
+                maxpix_img = FFfile.selectFFFrames(img_handle.ff.maxpixel, img_handle.ff, frame_min, frame_max)
+
+            else:
+                maxpix_img = img_handle.ff.maxpixel
+
+
+            # Auto levels on maxpixel
+            min_lvl = np.percentile(img_handle.ff.maxpixel[2:], 1)
+            max_lvl = np.percentile(img_handle.ff.maxpixel[2:], 99.0)
+
+            # Adjust levels
+            maxpixel_autolevel = Image.adjustLevels(maxpix_img, min_lvl, 1.0, max_lvl)
+
+            show2(str(frame_min) + "-" + str(frame_max) + " threshold", np.concatenate((maxpixel_autolevel, \
+                img.astype(maxpix_img.dtype)*(2**(maxpix_img.itemsize*8) - 1)), axis=1))
+
+            ###
+
 
         # # Show maxpixel of the thresholded part
         # mask = np.zeros(shape=img.shape)
@@ -557,15 +516,11 @@ def getLines(ff, k1, j1, time_slide, time_window_size, max_lines, max_white_rati
             # 1 - Remove lonely pixels
         img = morph.morphApply(img, [1, 2, 3, 4, 1])
 
-        # # Show morphed over maxpixel
-        # temp = ff.maxpixel - img.astype(np.int16)*255
-        # temp[temp>0] = 0
-        # show('compare', temp-ff.maxpixel)
 
-        # # Show morphed image
-        # show(str(frame_min) + "-" + str(frame_max) + " morph", img)
+        if debug:
+            # Show morphed image
+            show(str(frame_min) + "-" + str(frame_max) + " morph", img)
 
-        ###
 
         # Get image shape
         w, h = img.shape[1], img.shape[0]
@@ -585,13 +540,16 @@ def getLines(ff, k1, j1, time_slide, time_window_size, max_lines, max_white_rati
 
 
         # Skip further operations if there are no lines
+        frame_lines = []
         if lines.any():
             for rho, theta in lines:
                 line_results.append([rho, theta, frame_min, frame_max])
+                frame_lines.append([rho, theta, frame_min, frame_max])
 
 
-        # if line_results:
-        #     plotLines(ff, line_results)
+        if debug:
+            if frame_lines:
+                plotLines(img_handle.ff, frame_lines)
 
 
     return line_results
@@ -623,13 +581,13 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
         """
 
         A = np.vstack([x, np.ones(len(x))]).T
-        m, c = np.linalg.lstsq(A, y)[0]
+        m, c = np.linalg.lstsq(A, y, rcond=None)[0]
 
         return m, c
 
 
 
-    def _connectBrokenChains(centroids, max_distance, last_count=0):
+    def _connectBrokenChains(chains, max_distance, last_count=0):
         """ Connect broken chains of centroids.
         """
 
@@ -642,8 +600,8 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
                 continue
 
             # Get last point of first chain
-            x1 = chain1[-1][1]
-            y1 = chain1[-1][2]
+            x1 = chain1[-1][2]
+            y1 = chain1[-1][3]
 
             found_pair = False
             for j, chain2 in enumerate(chains[i+1:]):
@@ -656,8 +614,8 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
                     continue
 
                 # Get first point of the second chain
-                x2 = chain2[0][1]
-                y2 = chain2[0][2]
+                x2 = chain2[0][2]
+                y2 = chain2[0][3]
 
                 # Check if chains connect
                 if _pointDistance(x1, y1, x2, y2) <= max_distance:
@@ -677,7 +635,7 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
 
         # Iteratively connect chains until all chains are connected
         if len(filtered_chains) != last_count:
-            filtered_chains = _connectBrokenChains(centroids, max_distance, len(filtered_chains))
+            filtered_chains = _connectBrokenChains(chains, max_distance, len(filtered_chains))
 
         return filtered_chains
 
@@ -691,8 +649,8 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
 
     # Separate by individual columns of the centroid array
     frame_array = centroids_array[:,0]
-    x_array = centroids_array[:,1]
-    y_array = centroids_array[:,2]
+    x_array = centroids_array[:,2]
+    y_array = centroids_array[:,3]
 
     # LSQ fit by both axes
     try:
@@ -724,12 +682,12 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
             chains.append([filtered_centroids[i]])
 
         # Current point position
-        x1 = filtered_centroids[i][1]
-        y1 = filtered_centroids[i][2]
+        x1 = filtered_centroids[i][2]
+        y1 = filtered_centroids[i][3]
 
         # Next point position
-        x2 = filtered_centroids[i+1][1]
-        y2 = filtered_centroids[i+1][2]
+        x2 = filtered_centroids[i+1][2]
+        y2 = filtered_centroids[i+1][3]
 
         # Check if the current and the next point are sufficiently close
         if _pointDistance(x1, y1, x2, y2) <= max_distance:
@@ -741,7 +699,7 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
             
 
     # Connect broken chains
-    filtered_chains = _connectBrokenChains(centroids, max_distance)
+    filtered_chains = _connectBrokenChains(chains, max_distance)
 
 
     # Choose the chain with the greatest length
@@ -754,17 +712,68 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
     return best_chain
 
 
-
-def checkAngularVelocity(centroids, config):
+def checkAngularVelocity3D(detected_line, config, correct_binning=False):
     """ Check the angular velocity of the detection, and reject those too slow or too fast to be meteors. 
         The minimum ang. velocity is 0.5 deg/s, while maximum is 35 deg/s (Peter Gural, private comm.).
+    
+    Arguments:
+        detected_line: [list] A list which contains the 3D coordinates of the detected line.
+        config: [config object] configuration object (loaded from the .config file)
+
+    Keyword arguments:
+        correct_binning: [bool] Correct the centroids for binning.
+    
+    Return:
+        ang_vel, ang_vel_status: [float, bool]
+            - ang_vel - angular velovity in deg/s
+            - ang_vel_status - True if the velocity is in the meteor ang. velocity range, False otherwise
+
+    """
+
+    # Get coordinates of 2 points that describe the line
+    x1, y1, z1 = detected_line[0]
+    x2, y2, z2 = detected_line[1]
+
+    # Correct the points for binning
+    if correct_binning and (config.detection_binning_factor > 1):
+        x1 *= config.detection_binning_factor
+        y1 *= config.detection_binning_factor
+        x2 *= config.detection_binning_factor
+        y2 *= config.detection_binning_factor
+
+
+    # Compute the average angular velocity in px per frame
+    ang_vel = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)/(z2 - z1)
+
+    # Convert to px/sec
+    ang_vel = ang_vel*config.fps
+
+    # Convert to deg/sec
+    scale = (config.fov_h/float(config.height) + config.fov_w/float(config.width))/2.0
+    ang_vel = ang_vel*scale
+
+    # Check if the meteor is in the possible angular velocity range (deg/s)
+    if (ang_vel >= config.ang_vel_min and ang_vel <= config.ang_vel_max):
+        return ang_vel, True
+
+    else:
+        return ang_vel, False
+
+
+
+def checkAngularVelocity(centroids, config):
+    """ Check the angular velocity of the detected centroids, and reject those too slow or too fast to be 
+        meteors. The minimum ang. velocity is 0.5 deg/s, while maximum is 35 deg/s (Peter Gural, private 
+        comm.).
     
     Arguments:
         centroids: [ndarray] meteor centroids from the detector
         config: [config object] configuration object (loaded from the .config file)
     
     Return:
-        [bool] True if the velocity is in the meteor ang. velocity range, False otherwise
+        ang_vel, ang_vel_status: [float, bool]
+            - ang_vel - angular velovity in deg/s
+            - ang_vel_status - True if the velocity is in the meteor ang. velocity range, False otherwise
 
     """
 
@@ -772,8 +781,8 @@ def checkAngularVelocity(centroids, config):
     first_centroid = centroids[0]
     last_centroid = centroids[-1]
     
-    frame1, x1, y1, _ = first_centroid
-    frame2, x2, y2, _ = last_centroid
+    frame1, _, x1, y1, _ = first_centroid
+    frame2, _, x2, y2, _ = last_centroid
 
     ang_vel = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)/float(frame2 - frame1 + 1)
 
@@ -786,10 +795,11 @@ def checkAngularVelocity(centroids, config):
 
     # Check if the meteor is in the possible angular velocity range (deg/s)
     if (ang_vel >= config.ang_vel_min and ang_vel <= config.ang_vel_max):
-        return True
+        return ang_vel, True
 
     else:
-        return False
+        return ang_vel, False
+
 
 
 
@@ -813,14 +823,42 @@ def show2(name, img):
 
 
 
+def showAutoLevels(img):
+
+    # Auto levels
+    min_lvl = np.percentile(img[2:], 1)
+    max_lvl = np.percentile(img[2:], 99.0)
+
+    # Adjust levels
+    img_autolevel = Image.adjustLevels(img, min_lvl, 1.0, max_lvl)
+
+    plt.imshow(img_autolevel, cmap='gray')
+    plt.show()
+
+    ###
+
+
+
+
 def plotLines(ff, line_list):
     """ Plot lines on the image.
     """
 
     img = np.copy(ff.maxpixel)
 
+
+    # Auto adjust levels
+    min_lvl = np.percentile(img[2:], 1)
+    max_lvl = np.percentile(img[2:], 99.0)
+
+    # Adjust levels
+    img = Image.adjustLevels(img, min_lvl, 1.0, max_lvl)
+
     hh = img.shape[0]/2.0
     hw = img.shape[1]/2.0
+
+    # Compute the maximum level value
+    max_lvl = 2**(img.itemsize*8) - 1
 
     for rho, theta, frame_min, frame_max in line_list:
         theta = np.deg2rad(theta)
@@ -835,24 +873,18 @@ def plotLines(ff, line_list):
         x2 = int(x0 - 1000*(-b) + hw)
         y2 = int(y0 - 1000*(a) + hh)
         
-        cv2.line(img, (x1, y1), (x2, y2), (255, 0, 255), 1)
+        cv2.line(img, (x1, y1), (x2, y2), (max_lvl, 0, max_lvl), 1)
         
     show2("KHT", img)
 
 
 
-def show3DCloud(ff, stripe, detected_line=None, stripe_points=None, config=None):
+def show3DCloud(ff, xs, ys, zs, detected_line=None, stripe_points=None, config=None):
     """ Shows 3D point cloud of stripe points.
     """
 
     if detected_line is None:
         detected_line = []
-
-    stripe_indices = stripe.nonzero()
-
-    xs = stripe_indices[1]
-    ys = stripe_indices[0]
-    zs = ff.maxframe[stripe_indices]
 
     logDebug('points: ', len(xs))
 
@@ -898,8 +930,77 @@ def show3DCloud(ff, stripe, detected_line=None, stripe_points=None, config=None)
 
 
 
-def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
-    """ Detect meteors on the given FF bin image. Here are the steps in the detection:
+def preprocessFF(img_handle, mask, flat_struct, dark):
+    """ Apply the mask, dark and flat to FF file in img_handle. """
+
+
+    if not img_handle.ff.calibrated:
+
+        # Apply the dark frame to maxpixel and avepixel    
+        if dark is not None:
+            img_handle.ff.maxpixel = Image.applyDark(img_handle.ff.maxpixel, dark)
+            img_handle.ff.avepixel = Image.applyDark(img_handle.ff.avepixel, dark)
+
+
+        # Apply the flat to maxpixel and avepixel
+        if flat_struct is not None:
+
+            img_handle.ff.maxpixel = Image.applyFlat(img_handle.ff.maxpixel, flat_struct)
+            img_handle.ff.avepixel = Image.applyFlat(img_handle.ff.avepixel, flat_struct)
+
+
+        # Mask the FF file
+        img_handle.ff = MaskImage.applyMask(img_handle.ff, mask, ff_flag=True)
+
+        # Set the FF calibration status to True
+        img_handle.ff.calibrated = True
+
+
+    return img_handle
+
+
+
+def thresholdAndCorrectGammaFF(img_handle, config, mask):
+    """ Prepare the FF for centroid extraction by performing gamma correction. """
+
+    # Threshold the FF
+    img_thres = thresholdFF(img_handle.ff, config.k1_det, config.j1_det)
+
+
+    # Gamma correct image files
+    maxpixel_gamma_corr = Image.gammaCorrection(img_handle.ff.maxpixel, config.gamma)
+    avepixel_gamma_corr = Image.gammaCorrection(img_handle.ff.avepixel, config.gamma)
+    stdpixel_gamma_corr = Image.gammaCorrection(img_handle.ff.stdpixel, config.gamma)
+
+    # Make sure there are no zeros in standard deviation
+    stdpixel_gamma_corr[stdpixel_gamma_corr == 0] = 1
+
+    # Calculate weights for centroiding (apply gamma correction on both images)
+    max_avg_corrected = maxpixel_gamma_corr - avepixel_gamma_corr
+    flattened_weights = (max_avg_corrected).astype(np.float32)/stdpixel_gamma_corr
+
+
+    # At the end, a check that the detection has a surface brightness above the background will be performed.
+    # The assumption here is that the peak of the meteor should have the intensity which is at least
+    # that of a patch of 4x4 pixels that are of the mean background brightness
+    min_patch_intensity = 4*4*(np.mean(maxpixel_gamma_corr - avepixel_gamma_corr) \
+        + config.k1_det*np.mean(stdpixel_gamma_corr) + config.j1)
+
+    # Apply a special minimum path intensity multiplier
+    min_patch_intensity *= config.min_patch_intensity_multiplier
+
+    # Correct the minimum patch intensity if the image was binned with the 'avg' method
+    if (img_handle != 'ff') and (config.detection_binning_method == 'avg'):
+        min_patch_intensity *= config.detection_binning_factor**2
+
+
+    return img_thres, max_avg_corrected, flattened_weights, min_patch_intensity
+
+
+
+
+def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, asgard=False, debug=False):
+    """ Detect meteors on the given image. Here are the steps in the detection:
             - input image (FF bin format file) is thresholded (converted to black and white)
             - several morphological operations are applied to clean the image
             - image is then broken into several image "windows" (these "windows" are reconstructed from the input FF file, given
@@ -911,12 +1012,16 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
             - centroiding is performed, which calculates the position and intensity of meteor on each frame
     
     Arguments:
-        ff_directory: [string] an absolute path to the input FF bin file
-        ff_name: [string] file name of the FF bin file on which to run the detection on
+        img_handle: [FrameInterface instance] Object which has a common interface to various input files.
         config: [config object] configuration object (loaded from the .config file)
 
     Keyword arguments:
         flat_struct: [Flat struct] Structure containing the flat field. None by default.
+        dark: [ndarray] Dark frame. None by default.
+        mask: [ndarray] Mask image. None by default.
+        asgard: [bool] If True, the vid file sequence number will be added in with the frame. False by 
+            default, in which case only the frame number will be in the centroids.
+        debug: [bool] If True, graphs for testing the detection settings will be shown. False by default.
     
     Return:
         meteor_detections: [list] a list of detected meteors, with these elements:
@@ -929,34 +1034,37 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
     t1 = time()
     t_all = time()
 
-    # Load the FF bin file
-    ff = FFfile.read(ff_directory, ff_name)
 
-    # If the file could not be read, skip detection
-    if ff is None:
-        return []
+    # Bin the mask, dark and flat, only when not running on FF files
+    if (img_handle.input_type != 'ff') and (config.detection_binning_factor > 1):
 
-    # Load the mask file
-    mask = MaskImage.loadMask(config.mask_file)
+        # Bin the mask
+        if mask is not None:
+            mask.img = Image.binImage(mask.img, config.detection_binning_factor, 'avg')
 
-    # Mask the FF file
-    ff = MaskImage.applyMask(ff, mask, ff_flag=True)
+        # Bin the dark
+        if dark is not None:
+            dark = Image.binImage(dark, config.detection_binning_factor, 'avg')
 
-    # Apply the flat to maxpixel and avepixel
-    if flat_struct is not None:
-
-        ff.maxpixel = Image.applyFlat(ff.maxpixel, flat_struct)
-        ff.avepixel = Image.applyFlat(ff.avepixel, flat_struct)
+        # Bin the flat
+        if flat_struct is not None:
+            flat_struct.binFlat(config.detection_binning_factor, 'avg')
 
 
-    # # Show the maxpixel image
-    # show2(ff_name+' maxpixel', ff.maxpixel)
+    # Do all image processing on single FF file, if given
+    # Otherwise, the image processing will be done on every frame chunk that is extracted
+    if img_handle.input_type == 'ff':
+
+        # Apply mask and flat to FF
+        img_handle = preprocessFF(img_handle, mask, flat_struct, dark)
+
 
     # Get lines on the image
-    line_list = getLines(ff, config.k1_det, config.j1_det, config.time_slide, config.time_window_size, 
-        config.max_lines_det, config.max_white_ratio, config.kht_lib_path)
+    line_list = getLines(img_handle, config.k1_det, config.j1_det, config.time_slide, config.time_window_size, 
+        config.max_lines_det, config.max_white_ratio, config.kht_lib_path, mask=mask, \
+        flat_struct=flat_struct, dark=dark, debug=debug)
 
-    logDebug('List of lines:', line_list)
+    # logDebug('List of lines:', line_list)
 
 
     # Init meteor list
@@ -966,76 +1074,65 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
     if len(line_list):
 
         # Join similar lines
-        line_list = mergeLines(line_list, config.line_min_dist, ff.ncols, ff.nrows)
+        line_list = mergeLines(line_list, config.line_min_dist, img_handle.ff.ncols, img_handle.ff.nrows)
 
         logDebug('Time for finding lines:', time() - t1)
 
         logDebug('Number of KHT lines: ', len(line_list))
-        logDebug(line_list)
 
-        # Plot lines
-        # plotLines(ff, line_list)
+        # # Plot lines
+        # plotLines(img_handle.ff, line_list)
 
-        # Threshold the image
-        img_thres = thresholdImg(ff, config.k1_det, config.j1_det)
 
         filtered_lines = []
 
-
-        # Gamma correct image files
-        maxpixel_gamma_corr = Image.gammaCorrection(ff.maxpixel, config.gamma)
-        avepixel_gamma_corr = Image.gammaCorrection(ff.avepixel, config.gamma)
-        stdpixel_gamma_corr = Image.gammaCorrection(ff.stdpixel, config.gamma)
-
-        # Calculate weights for centroiding (apply gamma correction on both images)
-        max_avg_corrected = maxpixel_gamma_corr - avepixel_gamma_corr
-        flattened_weights = (max_avg_corrected).astype(np.float32)/stdpixel_gamma_corr
-
-
-        # At the end, a check that the detection has a surface brightness above the background will be performed.
-        # The assumption here is that the peak of the meteor should have the intensity which is at least
-        # that of a patch of 4x4 pixels that are of the mean background brightness
-        min_patch_intensity = 4*4*(np.mean(maxpixel_gamma_corr - avepixel_gamma_corr) \
-            + config.k1_det*np.mean(stdpixel_gamma_corr) + config.j1)
-
-
         # Analyze stripes of each line
+        # This step makes sure that there is a linear propagation of the detections in time
         for line in line_list:
+
             rho, theta, frame_min, frame_max = line
 
-            logDebug('rho, theta, frame_min, frame_max')
-            logDebug(rho, theta, frame_min, frame_max)
+            logDebug('\n--------------------------------')
+            logDebug('    rho,  theta, frame_min, frame_max')
+            logDebug("{:7.2f}, {:6.2f}, {:9d}, {:9d}".format(rho, theta, frame_min, frame_max))
 
-            # Bounded the thresholded image by min and max frames
-            img = selectFrames(np.copy(img_thres), ff, frame_min, frame_max)
 
-            # Remove lonely pixels
-            img = morph.clean(img)
+            # If FF files are not used as input, reconstruct it
+            if img_handle.input_type != 'ff':
 
-            # Get indices of stripe pixels around the line
-            stripe_indices = getStripeIndices(rho, theta, config.stripe_width, img.shape[0], img.shape[1])
+                # Compute the FF for this chunk
+                img_handle.loadChunk(first_frame=frame_min, read_nframes=(frame_max - frame_min + 1))
 
-            # Extract the stripe from the thresholded image
-            stripe = np.zeros((ff.nrows, ff.ncols), np.uint8)
-            stripe[stripe_indices] = img[stripe_indices]
+                # Apply mask and flat to FF
+                img_handle = preprocessFF(img_handle, mask, flat_struct, dark)
 
-            # Show stripe
-            # show2("stripe", stripe*255)
+                # ### PLOT CHUNK
+                # img = img_handle.ff.maxpixel - img_handle.ff.avepixel
 
-            # Show 3D could
-            # show3DCloud(ff, stripe)
+                # # Auto adjust levels
+                # min_lvl = np.percentile(img[2:], 1)
+                # max_lvl = np.percentile(img[2:], 99.0)
 
-            # Get stripe positions
-            stripe_positions = stripe.nonzero()
-            xs = stripe_positions[1]
-            ys = stripe_positions[0]
-            zs = ff.maxframe[stripe_positions]
+                # # Adjust levels
+                # img = Image.adjustLevels(img, min_lvl, 1.0, max_lvl)
+
+                # # Show the image chunk, average subtracted
+                # plt.imshow(img, cmap='gray')
+                # plt.show()
+                # ### ###
+
+                logDebug('Checking temporal propagation at time:', img_handle.name())
+                
+
+            # Extract (x, y, frame) of thresholded frames, i.e. pixel and frame locations of threshold passers
+            xs, ys, zs = getThresholdedStripe3DPoints(config, img_handle, frame_min, frame_max, rho, theta, \
+                mask, flat_struct, dark, debug=False)
 
             # Limit the number of points to search if too large
             if len(zs) > config.max_points_det:
 
                 # Extract weights of each point
-                maxpix_elements = ff.maxpixel[ys,xs].astype(np.float64)
+                maxpix_elements = img_handle.ff.maxpixel[ys,xs].astype(np.float64)
                 weights = maxpix_elements/np.sum(maxpix_elements)
 
                 # Random sample the point, sampling is weighted by pixel intensity
@@ -1044,7 +1141,7 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
                 xs = xs[indices]
                 zs = zs[indices]
 
-            # Make an array to feed into the gropuing algorithm
+            # Make an array to feed into the grouping algorithm
             stripe_points = np.vstack((xs, ys, zs))
             stripe_points = np.swapaxes(stripe_points, 0, 1)
             
@@ -1058,27 +1155,49 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
             # Find a single line in the point cloud
             detected_line = find3DLines(stripe_points, time(), config, fireball_detection=False)
 
-            logDebug('time for GROUPING: ', time() - t1)
+            logDebug('time for GROUPING: {:.3f}'.format(time() - t1))
 
             # Extract the first and only line if any
             if detected_line:
                 detected_line = detected_line[0]
 
                 # logDebug(detected_line)
+                
 
-                # Show 3D cloud
-                # show3DCloud(ff, stripe, detected_line, stripe_points, config)
+                # Check the detection if it has the proper angular velocity (correct for binning if not 
+                #   using FF files as input)
+                ang_vel, ang_vel_status = checkAngularVelocity3D(detected_line, config, 
+                    correct_binning=(img_handle.input_type != 'ff'))
+
+                if not ang_vel_status:
+                    logDebug('Rejected at initial stage due to the angular velocity: {:.2f} deg/s'.format(ang_vel))
+                    continue
+
+                # # Show 3D cloud
+                # show3DCloud(img_handle.ff, xs, ys, zs, detected_line, stripe_points, config)
 
                 # Add the line to the results list
                 filtered_lines.append(detected_line)
 
+            else:
+                logDebug('No temporal propagation found!')
+
+
         # Merge similar lines in 3D
         filtered_lines = merge3DLines(filtered_lines, config.vect_angle_thresh)
 
-        logDebug('after filtering:')
-        logDebug(filtered_lines)
+        # logDebug('after filtering:')
+        # logDebug(filtered_lines)
 
 
+        # If the input is a single FF file, threshold the image right away and do gamma correction
+        if img_handle.input_type == 'ff':
+
+            img_thres, max_avg_corrected, flattened_weights, \
+                min_patch_intensity = thresholdAndCorrectGammaFF(img_handle, config, mask)
+
+
+        # Go through all detected and filtered lines and compute centroids
         for detected_line in filtered_lines:
 
             # Get frame range
@@ -1089,13 +1208,13 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
             if (abs(frame_max - frame_min) + 1 < config.line_minimum_frame_range_det):
                 continue
 
-            # Extand the frame range for several frames, just to be sure to catch all parts of a meteor
+            # Extend the frame range for several frames, just to be sure to catch all parts of the meteor
             frame_min -= config.frame_extension
             frame_max += config.frame_extension
 
-            # Cap values to 0-255
+            # Cap values
             frame_min = max(frame_min, 0)
-            frame_max = min(frame_max, 255)
+            frame_max = min(frame_max, img_handle.total_frames - 1)
 
             logDebug(detected_line)
 
@@ -1104,37 +1223,41 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
             x2, y2, z2 = detected_line[1]
 
             # Convert Cartesian line coordinates to polar
-            rho, theta = getPolarLine(x1, y1, x2, y2, ff.nrows, ff.ncols)
+            rho, theta = getPolarLine(x1, y1, x2, y2, img_handle.ff.nrows, img_handle.ff.ncols)
+
+            # Skip the line if rho could not be computed
+            if np.isnan(rho):
+                continue
 
             # Convert Cartesian line coordinate to CAMS compatible polar coordinates (flipped Y axis)
-            rho_cams, theta_cams = getPolarLine(x1, ff.nrows - y1, x2, ff.nrows - y2, ff.nrows, ff.ncols)
+            rho_cams, theta_cams = getPolarLine(x1, img_handle.ff.nrows - y1, x2, img_handle.ff.nrows - y2, \
+                img_handle.ff.nrows, img_handle.ff.ncols)
 
 
-            logDebug('converted rho, theta')
-            logDebug(rho, theta)
+            # logDebug('converted rho, theta')
+            # logDebug(rho, theta)
 
-            # Bounded the thresholded image by min and max frames
-            img = selectFrames(np.copy(img_thres), ff, frame_min, frame_max)
+            # If other input types are given, load the frames and preprocess them
+            if img_handle.input_type != 'ff':
+                
+                # Compute the FF for this chunk
+                img_handle.loadChunk(first_frame=frame_min, read_nframes=(frame_max - frame_min + 1))
 
-            # Remove lonely pixels
-            img = morph.clean(img)
+                # Preprocess image for this chunk
+                img_handle = preprocessFF(img_handle, mask, flat_struct, dark)
+
+                img_thres, max_avg_corrected, flattened_weights, \
+                    min_patch_intensity = thresholdAndCorrectGammaFF(img_handle, config, mask)
+
+                logDebug('Centroiding at time:', img_handle.name())
+                
 
 
-            # Get indices of stripe pixels around the line
-            stripe_indices = getStripeIndices(rho, theta, int(config.stripe_width*1.5), img.shape[0], img.shape[1])
+            # Extract (x, y, frame) of thresholded frames, i.e. pixel and frame locations of threshold passers
+            xs, ys, zs = getThresholdedStripe3DPoints(config, img_handle, frame_min, frame_max, rho, theta, \
+                mask, flat_struct, dark, stripe_width_factor=1.5, centroiding=True, \
+                point1=detected_line[0], point2=detected_line[1], debug=False)
 
-            # Extract the stripe from the thresholded image
-            stripe = np.zeros((ff.nrows, ff.ncols), np.uint8)
-            stripe[stripe_indices] = img[stripe_indices]
-
-            # Show detected line
-            # show('detected line: '+str(frame_min)+'-'+str(frame_max), stripe)
-
-            # Get stripe positions
-            stripe_positions = stripe.nonzero()
-            xs = stripe_positions[1]
-            ys = stripe_positions[0]
-            zs = ff.maxframe[stripe_positions]
 
             # Make an array to feed into the centroiding algorithm
             stripe_points = np.vstack((xs, ys, zs))
@@ -1143,8 +1266,8 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
             # Sort stripe points by frame
             stripe_points = stripe_points[stripe_points[:,2].argsort()]
 
-            # Show 3D cloud
-            # show3DCloud(ff, stripe, detected_line, stripe_points, config)
+            # # Show 3D cloud
+            # show3DCloud(img_handle.ff, xs, ys, zs, detected_line, stripe_points, config)
 
             # Get points of the given line
             line_points = getAllPoints(stripe_points, x1, y1, z1, x2, y2, z2, config, 
@@ -1152,21 +1275,20 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
 
             # Skip if no points were returned
             if not line_points.any():
+                logDebug('No line found in line refinement...')
                 continue
 
             # Skip if the points cover too small a frame range
-            if abs(np.max(line_points[:,2]) - np.min(line_points[:,2])) + 1 < config.line_minimum_frame_range_det:
+            frame_range = abs(np.max(line_points[:,2]) - np.min(line_points[:,2])) + 1
+            if frame_range < config.line_minimum_frame_range_det:
+                logDebug('Too small frame range! {:d} < {:d}'.format(frame_range, \
+                    config.line_minimum_frame_range_det))
                 continue
 
 
-            # Compute the average angular velocity in px per frame
-            ang_vel_avg = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)/(z2 - z1)
-
             # Calculate centroids
             centroids = []
-
-
-            for i in range(frame_min, frame_max+1):
+            for i in range(frame_min, frame_max + 1):
                 
                 # Select pixel indicies belonging to a given frame
                 frame_pixels_inds = np.where(line_points[:,2] == i)
@@ -1188,12 +1310,12 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
                     if config.deinterlace_order >= 0:
 
                         # Deinterlace by fields (line lixels)
-                        half_frame_pixels = frame_pixels[frame_pixels[:,1] % 2 == (config.deinterlace_order 
-                            + half_frame) % 2]
+                        half_frame_pixels = frame_pixels[frame_pixels[:,1]%2 == (config.deinterlace_order 
+                            + half_frame)%2]
 
                         # Deinterlace by fields (stripe pixels)
                         half_frame_pixels_stripe = frame_pixels_stripe[frame_pixels_stripe[:,1] % 2 == (config.deinterlace_order 
-                            + half_frame) % 2]
+                            + half_frame)%2]
 
 
                         # Skip if there are no pixels in the half-frame
@@ -1201,7 +1323,7 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
                             continue
 
                         # Calculate half-frame value
-                        frame_no = i+half_frame*0.5
+                        frame_no = i + half_frame*0.5
 
 
                     # No deinterlacing
@@ -1232,18 +1354,68 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
 
                         # Compute the corrected frame time
                         frame_no = RollingShutterCorrection.correctRollingShutterTemporal(frame_no, \
-                            y_centroid, ff.maxpixel.shape[0])
+                            y_centroid, img_handle.ff.maxpixel.shape[0])
+
+
+                    # Get current frame if video or images are used as input
+                    if img_handle.input_type != 'ff':
+
+                        ### Extract intensity from frame ###
+
+                        # Load the frame
+                        img_handle.setFrame(int(frame_no))
+                        fr_img = img_handle.loadFrame()
+
+                        # Get the frame sequence number (frame number since the beginning of the recording)
+                        seq_num = img_handle.getSequenceNumber()
+
+                        # Apply dark frame
+                        if dark is not None:
+                            fr_img = Image.applyDark(fr_img, dark)
+
+
+                        # Apply the flat to frame
+                        if flat_struct is not None:
+                            fr_img = Image.applyFlat(fr_img, flat_struct)
+
+
+                        # Mask the image
+                        fr_img = MaskImage.applyMask(fr_img, mask)
+
+
+                        # Apply gamma correction
+                        fr_img = Image.gammaCorrection(fr_img, config.gamma)
+
+                        # Subtract average
+                        max_avg_corrected = Image.applyDark(fr_img, img_handle.ff.avepixel)
+
+                    else:
+
+                        # If the FF file is used, set the sequence number to the current frame number
+                        seq_num = i
 
 
                     # Calculate intensity as the sum of threshold passer pixels on the stripe
-                    #intensity_values = max_avg_corrected[half_frame_pixels[:,1], half_frame_pixels[:,0]]
                     intensity_values = max_avg_corrected[half_frame_pixels_stripe[:,1], 
-                        half_frame_pixels_stripe[:,0]]
-                    intensity = np.sum(intensity_values)
-                    
-                    logDebug("centroid: ", frame_no, x_centroid, y_centroid, intensity)
+                            half_frame_pixels_stripe[:,0]]
 
-                    centroids.append([frame_no, x_centroid, y_centroid, intensity])
+                    intensity = int(np.sum(intensity_values))
+
+
+                    # Rescale the centroid position and intensity back to the pre-binned size
+                    if (img_handle.input_type != 'ff') and (config.detection_binning_factor > 1):
+                        x_centroid *= config.detection_binning_factor
+                        y_centroid *= config.detection_binning_factor
+
+                        # Rescale the intensity only if the binning method was 'average'
+                        if config.detection_binning_method == 'avg':
+                            intensity *= config.detection_binning_factor**2
+
+                    logDebug("centroid: fr {:.1f}, x {:.2f}, y {:.2f}, intens {:d}".format(frame_no, \
+                        x_centroid, y_centroid, intensity))
+
+                    # Add computed centroid to the centroid list
+                    centroids.append([frame_no, seq_num, x_centroid, y_centroid, intensity])
 
 
             # Filter centroids
@@ -1255,19 +1427,28 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
 
             # Reject the solution if there are too few centroids
             if len(centroids) < config.line_minimum_frame_range_det:
+                logDebug('Rejected due to too few frames!')
                 continue
-
 
             # Check that the detection has a surface brightness above the background
             # The assumption here is that the peak of the meteor should have the intensity which is at least
             # that of a patch of 4x4 pixels that are of the mean background brightness
-            if np.max(centroids[:, 3]) < min_patch_intensity:
+            if np.max(centroids[:, 4]) < min_patch_intensity:
+                logDebug('Rejected due to too low max patch intensity:', np.max(centroids[:, 4]), ' < ', \
+                    min_patch_intensity)
                 continue
 
 
             # Check the detection if it has the proper angular velocity
-            if not checkAngularVelocity(centroids, config):
+            ang_vel, ang_vel_status = checkAngularVelocity(centroids, config)
+            if not ang_vel_status:
+                logDebug('Rejected due to the angular velocity: {:.2f} deg/s'.format(ang_vel))
                 continue
+
+
+            # If the FTPdetectinfo format is requested, exclude the sequence number column from centroids
+            if not asgard:
+                centroids = np.delete(centroids, 1, axis=1)
 
 
             # Append the result to the meteor detections
@@ -1316,8 +1497,81 @@ def detectMeteors(ff_directory, ff_name, config, flat_struct=None):
 
 if __name__ == "__main__":
 
-    # Load config file
-    config = cr.parse(".config")
+
+
+    ### COMMAND LINE ARGUMENTS
+
+    # Init the command line arguments parser
+    arg_parser = argparse.ArgumentParser(description="Run RMS meteor detection on given data.")
+
+    arg_parser.add_argument('dir_path', nargs='+', metavar='DIR_PATH', type=str, \
+        help='Path to the folder with FF or image files, or path to a video file. If images or videos are given, their names must be in the format: YYYYMMDD_hhmmss.uuuuuu, or the beginning time has to be given.')
+
+    arg_parser.add_argument('-c', '--config', nargs=1, metavar='CONFIG_PATH', type=str, \
+        help="Path to a config file which will be used instead of the default one.")
+
+    arg_parser.add_argument('-o', '--outdir', nargs=1, metavar='OUTDIR', type=str, \
+        help="Path to the output directory where the detections will be saved.")
+
+    arg_parser.add_argument('-t', '--timebeg', nargs=1, metavar='TIME', type=str, \
+        help="The beginning time of the video file in the YYYYMMDD_hhmmss.uuuuuu format. Not needed for FF or vid files.")
+
+    arg_parser.add_argument('-f', '--fps', metavar='FPS', type=float, \
+        help="Frames per second when images are used. If not given, it will be read from the config file. Not needed for FF or vid files.")
+
+    arg_parser.add_argument('-g', '--gamma', metavar='CAMERA_GAMMA', type=float, \
+        help="Camera gamma value. Science grade cameras have 1.0, consumer grade cameras have 0.45. Adjusting this is essential for good photometry, and doing star photometry through SkyFit can reveal the real camera gamma.")
+
+    arg_parser.add_argument('-a', '--asgard', nargs=1, metavar='ASGARD_PLATEPAR', type=str, \
+        help="""Write output as ASGARD event files, not CAMS FTPdetectinfo. Path to the platepar file needs to be given.""")
+
+
+    arg_parser.add_argument('-d', '--debug', action="store_true", \
+        help="""Show debug info on the screen. """)
+
+    arg_parser.add_argument('-i', '--debugplots', action="store_true", \
+        help="""Show graphs (calibrated image, thresholded image, detected lines) which can help adjust the detection settings. """)
+
+    # Parse the command line arguments
+    cml_args = arg_parser.parse_args()
+
+    #########################
+
+
+    # Load the config file
+    config = cr.loadConfigFromDirectory(cml_args.config, cml_args.dir_path)
+
+
+    # If camera gamma was given, change the value in config
+    if cml_args.gamma is not None:
+        config.gamma = cml_args.gamma
+
+
+    # Parse the beginning time into a datetime object
+    if cml_args.timebeg is not None:
+
+        beginning_time = datetime.datetime.strptime(cml_args.timebeg[0], "%Y%m%d_%H%M%S.%f")
+
+    else:
+        beginning_time = None
+
+
+
+    # Check if a correct platepar file was given for ASGARD data
+    if cml_args.asgard is not None:
+
+        # Extract the path to the platepar file
+        platepar_path = cml_args.asgard[0]
+
+        platepar = Platepar()
+        pp_status = platepar.read(platepar_path)
+
+        if not pp_status:
+            print('The platepar file could not be loaded: {:s}'.format(platepar_path))
+            print('Exiting...')
+
+            sys.exit()
+
 
 
     # Measure the time of the whole operation
@@ -1327,90 +1581,242 @@ if __name__ == "__main__":
     ### Init the logger
 
     from RMS.Logger import initLogging
-    initLogging('detection_')
+    initLogging(config, 'detection_')
 
     log = logging.getLogger("logger")
 
     ######
 
-    
-    if len(sys.argv) == 1:
-        print("Usage: python -m RMS.Detection /path/to/ff/files/")
-        sys.exit()
+    # Check if a list of files is given
+    if len(cml_args.dir_path) > 1:
+
+        img_handle_list = []
+
+        # If it is, load files individually as separate image handles
+        for file_path in cml_args.dir_path:
+
+            file_path = file_path.replace('"', '')
+
+            img_handle = detectInputType(file_path, config, beginning_time=beginning_time, fps=cml_args.fps, \
+                detection=True)
+
+            img_handle_list.append(img_handle)
 
 
-    dir_path = sys.argv[1]
-        
-    
-    # Get paths to every FF bin file in a directory 
-    ff_list = [ff for ff in os.listdir(dir_path) if FFfile.validFFName(ff)]
-
-    # Check if there are any file in the directory
-    if(len(ff_list) == None):
-        print("No files found!")
-        sys.exit()
+        # Set the first image handle as the main one
+        img_handle_main = img_handle_list[0]
 
 
-    # Try loading a flat field image
-    flat_struct = None
+        # If folders with images are gicen, dump the detections in the parent directory
+        if img_handle_main.input_type == 'images':
+            
+            # Set the main directory to be the parent directory of all files
+            main_dir = os.path.abspath(os.path.join(img_handle_main.dir_path, os.pardir))
 
-    if config.use_flat:
-        
-        # Check if there is flat in the data directory
-        if os.path.exists(os.path.join(dir_path, config.flat_file)):
-            flat_struct = Image.loadFlat(dir_path, config.flat_file)
+        # For all else, dump detections into the directory with the data file
+        else:
+            main_dir = img_handle_main.dir_path
 
-        # Try loading the default flat
-        elif os.path.exists(config.flat_file):
-            flat_struct = Image.loadFlat(os.getcwd(), config.flat_file)
 
+
+    else:
+        dir_path_input = cml_args.dir_path[0].replace('"', '')
+
+        # Detect the input file format
+        img_handle_main = detectInputType(dir_path_input, config, beginning_time=beginning_time, \
+            fps=cml_args.fps, detection=True)
+
+        img_handle_list = []
+
+        # If the input format are FF files, break them down into single FF files
+        if img_handle_main.input_type == 'ff':
+            if not img_handle_main.single_ff:
+
+                # Go through all FF files and add them as individual files
+                for file_name in img_handle_main.ff_list:
+
+                    img_handle = detectInputType(os.path.join(dir_path_input, file_name), config, \
+                        skip_ff_dir=True, detection=True)
+
+                    img_handle_list.append(img_handle)
+
+
+        # Otherwise, just add the main image handle to the list
+        if len(img_handle_list) == 0:
+            img_handle_list.append(img_handle_main)
+
+
+        # Set the main directory to the the given input directory
+        main_dir = dir_path_input
+
+
+
+    # Check if the output directory was given. If not, the detection will be saved in the input directory
+    if cml_args.outdir:
+        out_dir = cml_args.outdir[0]
+
+        # Make sure the output directory exists
+        mkdirP(out_dir)
+
+    else:
+        out_dir = main_dir
+
+
+    # If debug is on, enable debug logging
+    if cml_args.debug:
+        VERBOSE_DEBUG = True
+
+
+    # Load mask, dark, flat
+    mask, dark, flat_struct = loadImageCalibration(main_dir, config, dtype=img_handle_main.ff.dtype, \
+        byteswap=img_handle_main.byteswap)
 
 
     # Init results list
     results_list = []
 
     # Open a file for results
-    results_path = os.path.abspath(dir_path) + os.sep
-    results_name = results_path.split(os.sep)[-2]
-    results_file = open(results_path + results_name+'_results.txt', 'w')
+    results_path = out_dir
+    results_name = config.stationID + "_" + img_handle_main.beginning_datetime.strftime("%Y%m%d_%H%M%S_%f")
+
+    if cml_args.debug:
+        results_file = open(os.path.join(results_path, results_name + '_results.txt'), 'w')
 
     total_meteors = 0
 
     # Run meteor search on every file
-    for ff_name in sorted(ff_list):
+    for img_handle in img_handle_list:
 
-        print('--------------------------------------------')
-        print(ff_name)
+        logDebug('--------------------------------------------')
+        logDebug(img_handle.name())
 
         # Run the meteor detection algorithm
-        meteor_detections = detectMeteors(results_path, ff_name, config, flat_struct=flat_struct)
+        meteor_detections = detectMeteors(img_handle, config, flat_struct=flat_struct, dark=dark, mask=mask, \
+            debug=cml_args.debugplots, asgard=cml_args.asgard)
+
+        # Supress numpy scientific notation printing
+        np.set_printoptions(suppress=True)
 
         meteor_No = 1
         for meteor in meteor_detections:
 
             rho, theta, centroids = meteor
 
-            # Print detection to file
-            results_file.write('-------------------------------------------------------\n')
-            results_file.write(ff_name+'\n')
-            results_file.write(str(rho) + ',' + str(theta) + '\n')
-            results_file.write(str(centroids)+'\n')
+            first_pick_time = img_handle.currentFrameTime(frame_no=int(centroids[0][0]), dt_obj=True)
+
+            if cml_args.debug:
+                # Print detection to file
+                results_file.write('-------------------------------------------------------\n')
+                results_file.write(str(first_pick_time) + '\n')
+                results_file.write(str(rho) + ',' + str(theta) + '\n')
+
+            # Write the time in results file instead of the frame
+            res_centroids = centroids.tolist()
+            for entry in res_centroids:
+                entry[0] = (img_handle.currentFrameTime(frame_no=int(entry[0]), \
+                    dt_obj=True) - first_pick_time).total_seconds()
+
+            if cml_args.debug:
+                results_file.write(str(np.array(res_centroids)) + '\n')
 
             # Append to the results list
-            results_list.append([ff_name, meteor_No, rho, theta, centroids])
+            results_list.append([img_handle.name(beginning=True), meteor_No, rho, theta, centroids])
             meteor_No += 1
 
             total_meteors += 1
 
 
-    results_file.close()
+
+        # Write output as ASGARD event file
+        if cml_args.asgard is not None:
+
+            # Letter of event for simultaneous event (65 = A, 66 = B, etc.)
+            current_letter = 65
+            prev_fn_time = 0
+
+            # Go through all centroids
+            for meteor in meteor_detections:
+
+                rho, theta, centroids = meteor
 
 
-    ftpdetectinfo_name = 'FTPdetectinfo_' + results_name + '.txt'
+                # Extract centroid columns
+                frame_array, seq_array, x_array, y_array, intensity_array = centroids.T
 
-    # Write FTPdetectinfo file
-    FTPdetectinfo.writeFTPdetectinfo(results_list, results_path, ftpdetectinfo_name, results_path, 
-        config.stationID, config.fps)
+
+                # Compute frame time for every centroid
+                time_array = []
+                for entry in centroids:
+
+                    # Compute the datetime for every frame
+                    frame_time = img_handle.currentFrameTime(frame_no=int(entry[0]))
+                    time_array.append(frame_time)
+
+
+                ### Compute alt/az and magnitudes
+                
+                # Compute ra/dec
+                jd_array, ra_array, dec_array, mag_array = XY2CorrectedRADecPP(time_array, x_array, y_array, \
+                    intensity_array, platepar)
+
+                # Compute alt/az
+                azim_array = []
+                alt_array = []
+                for jd, ra, dec in zip(jd_array, ra_array, dec_array):
+
+                    azim, alt = raDec2AltAz(jd, platepar.lon, platepar.lat, ra, dec)
+
+                    azim_array.append(azim)
+                    alt_array.append(alt)
+
+                ###
+
+                # Construct an input array for ASGARD event file function
+                ev_array = np.array([frame_array, seq_array, jd_array, intensity_array, x_array, y_array, \
+                    azim_array, alt_array, mag_array]).T
+
+
+                ### Construct the file name for the event file
+
+                # Find the time of the peak
+                jd_peak = jd_array[mag_array.argmin()]
+
+
+                # Construct the time part of the file name
+                fn_time = jd2Date(jd_peak, dt_obj=True)
+                fn_time = fn_time.strftime('%Y%m%d_%H%M%S')
+
+                # If the previous file name was the same, increment the file name letter
+                if fn_time == prev_fn_time:
+                    current_letter += 1
+                else:
+                    # Reset to 'A'
+                    current_letter = 65
+
+                prev_fn_time = fn_time
+
+                # Construct a file name for the event
+                file_name = 'ev_' + fn_time + chr(current_letter) + "_" + config.stationID + '.txt'
+
+                ###
+
+
+                # Write the ev file
+                writeEv(results_path, file_name, ev_array, platepar)
+
+
+    if cml_args.debug:
+        results_file.close()
+
+
+    # Write output as CAMS FTPdetectinfo files
+    if cml_args.asgard is None:
+
+        ftpdetectinfo_name = 'FTPdetectinfo_' + results_name + '.txt'
+
+        # Write FTPdetectinfo file
+        FTPdetectinfo.writeFTPdetectinfo(results_list, results_path, ftpdetectinfo_name, results_path, 
+            config.stationID, config.fps)
                 
 
 

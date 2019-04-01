@@ -39,7 +39,7 @@ from RMS.QueuedPool import QueuedPool
 
 
 def extractStars(ff_dir, ff_name, config=None, max_global_intensity=150, border=10, neighborhood_size=10, 
-        intensity_threshold=5, flat_struct=None):
+        intensity_threshold=5, flat_struct=None, dark=None, mask=None):
     """ Extracts stars on a given FF bin by searching for local maxima and applying PSF fit for star 
         confirmation.
 
@@ -55,13 +55,16 @@ def extractStars(ff_dir, ff_name, config=None, max_global_intensity=150, border=
         neighborhood_size: [int] size of the neighbourhood for the maximum search (in pixels)
         intensity_threshold: [float] a threshold for cutting the detections which are too faint (0-255)
         flat_struct: [Flat struct] Structure containing the flat field. None by default.
+        dark: [ndarray] Dark frame. None by default.
+        mask: [ndarray] Mask image. None by default.
 
     Return:
-        x2, y2, background, intensity: [list of ndarrays]
+        x2, y2, background, intensity, sigma_fitted: [list of ndarrays]
             - x2: X axis coordinates of the star
             - y2: Y axis coordinates of the star
             - background: background intensity
             - intensity: intensity of the star
+            - Gaussian stddev of fitted stars
     """
 
     # This will be returned if there was an error
@@ -78,20 +81,23 @@ def extractStars(ff_dir, ff_name, config=None, max_global_intensity=150, border=
     # Load the FF bin file
     ff = FFfile.read(ff_dir, ff_name)
 
-    # Load the mask file
-    mask = MaskImage.loadMask(config.mask_file)
-
-    # Mask the FF file
-    ff = MaskImage.applyMask(ff, mask, ff_flag=True)
 
     # If the FF file could not be read, skip star extraction
     if ff is None:
         return error_return
 
 
+    # Apply the dark frame
+    if dark is not None:
+        ff.avepixel = Image.applyDark(ff.avepixel, dark)
+
     # Apply the flat
     if flat_struct is not None:
         ff.avepixel = Image.applyFlat(ff.avepixel, flat_struct)
+
+    # Mask the FF file
+    if mask is not None:
+        ff = MaskImage.applyMask(ff, mask, ff_flag=True)
 
 
     # Calculate image mean and stddev
@@ -120,7 +126,7 @@ def extractStars(ff_dir, ff_name, config=None, max_global_intensity=150, border=
     border_mask[-border:,:] = 0
     border_mask[:,:border] = 0
     border_mask[:,-border:] = 0
-    maxima = MaskImage.applyMask(maxima, (True, border_mask))
+    maxima = MaskImage.applyMask(maxima, border_mask, image=True)
 
 
     # Find and label the maxima
@@ -144,21 +150,31 @@ def extractStars(ff_dir, ff_name, config=None, max_global_intensity=150, border=
     # plotStars(ff, x, y)
 
     # Fit a PSF to each star
-    x2, y2, amplitude, intensity = fitPSF(ff, global_mean, x, y, config)
+    x2, y2, amplitude, intensity, sigma_y_fitted, sigma_x_fitted = fitPSF(ff, global_mean, x, y, config)
+    
     # x2, y2, amplitude, intensity = list(x), list(y), [], [] # Skip PSF fit
 
     # # Plot stars after PSF fit filtering
     # plotStars(ff, x2, y2)
+    
 
-    return x2, y2, amplitude, intensity
+    # Compute one dimensional sigma
+    sigma_x_fitted = np.array(sigma_x_fitted)
+    sigma_y_fitted = np.array(sigma_y_fitted)
+    sigma_fitted = np.sqrt(sigma_x_fitted**2 + sigma_y_fitted**2)
+
+
+    return ff_name, x2, y2, amplitude, intensity, sigma_fitted
 
 
 
-def twoDGaussian(mesh, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
+def twoDGaussian(params, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
     """ Defines a 2D Gaussian distribution. 
     
     Arguments:
-        mesh: [tuple of floats] (x, y) independant variables
+        params: [tuple of floats] 
+            - (x, y) independant variables, 
+            - saturation: [int] Value at which saturation occurs
         amplitude: [float] amplitude of the PSF
         xo: [float] PSF center, X component
         yo: [float] PSF center, Y component
@@ -172,7 +188,7 @@ def twoDGaussian(mesh, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
 
     """
 
-    x, y = mesh
+    x, y, saturation = params
     
     xo = float(xo)
     yo = float(yo)
@@ -181,6 +197,9 @@ def twoDGaussian(mesh, amplitude, xo, yo, sigma_x, sigma_y, theta, offset):
     b = -(np.sin(2*theta))/(4*sigma_x**2) + (np.sin(2*theta))/(4*sigma_y**2)
     c = (np.sin(theta)**2)/(2*sigma_x**2) + (np.cos(theta)**2)/(2*sigma_y**2)
     g = offset + amplitude*np.exp(-(a*((x - xo)**2) + 2*b*(x - xo)*(y - yo) + c*((y - yo)**2)))
+
+    # Limit values to saturation level
+    g[g > saturation] = saturation
 
     return g.ravel()
 
@@ -213,6 +232,8 @@ def fitPSF(ff, avepixel_mean, x2, y2, config):
     y_fitted = []
     amplitude_fitted = []
     intensity_fitted = []
+    sigma_y_fitted = []
+    sigma_x_fitted = []
 
     # Set the initial guess
     initial_guess = (30.0, segment_radius, segment_radius, 1.0, 1.0, 0.0, avepixel_mean)
@@ -248,12 +269,15 @@ def fitPSF(ff, avepixel_mean, x2, y2, config):
         # Create x and y indices
         y_ind, x_ind = np.indices(star_seg.shape)
 
+        # Estimate saturation level from image type
+        saturation = 2**(8*star_seg.itemsize) - 1
+
         # Fit a PSF to the star
         try:
             # Fit the 2D Gaussian with the limited number of iterations - this reduces the processing time
             # and most of the bad star candidates take more iterations to fit
-            popt, pcov = opt.curve_fit(twoDGaussian, (y_ind, x_ind), star_seg.ravel(), p0=initial_guess, 
-                maxfev=200)
+            popt, pcov = opt.curve_fit(twoDGaussian, (y_ind, x_ind, saturation), star_seg.ravel(), \
+                p0=initial_guess, maxfev=200)
             # print(popt)
         except RuntimeError:
             # print('Fitting failed!')
@@ -314,6 +338,10 @@ def fitPSF(ff, avepixel_mean, x2, y2, config):
         # Subtract the background from the star segment and compute the total intensity
         intensity = np.sum(star_seg_crop - bg_corrected)
 
+        # Skip stars with zero intensity
+        if intensity <= 0:
+            continue
+
         # print(intensity)
         # plt.imshow(star_seg_crop - bg_corrected, cmap='gray', vmin=0, vmax=255)
         # plt.show()
@@ -335,6 +363,8 @@ def fitPSF(ff, avepixel_mean, x2, y2, config):
         y_fitted.append(y_min + yo)
         amplitude_fitted.append(amplitude)
         intensity_fitted.append(intensity)
+        sigma_y_fitted.append(sigma_y)
+        sigma_x_fitted.append(sigma_x)
 
         # # Plot fitted stars
         # data_fitted = twoDGaussian((y_ind, x_ind), *popt) - offset
@@ -351,7 +381,7 @@ def fitPSF(ff, avepixel_mean, x2, y2, config):
         # plt.clf()
         # plt.close()
 
-    return x_fitted, y_fitted, amplitude_fitted, intensity_fitted
+    return x_fitted, y_fitted, amplitude_fitted, intensity_fitted, sigma_y_fitted, sigma_x_fitted
 
 
 
@@ -392,23 +422,15 @@ if __name__ == "__main__":
     arg_parser.add_argument('-c', '--config', nargs=1, metavar='CONFIG_PATH', type=str, \
         help="Path to a config file which will be used instead of the default one.")
 
+    arg_parser.add_argument('-s', '--showstd', action="store_true", help="""Show a histogram of stddevs of PSFs of all detected stars. """)
+
     # Parse the command line arguments
     cml_args = arg_parser.parse_args()
 
     #########################
 
-    if cml_args.config is not None:
-
-        config_file = os.path.abspath(cml_args.config[0].replace('"', ''))
-
-        print('Loading config file:', config_file)
-
-        # Load the given config file
-        config = cr.parse(config_file)
-
-    else:
-        # Load the default configuration file
-        config = cr.parse(".config")
+    # Load the config file
+    config = cr.loadConfigFromDirectory(cml_args.config, cml_args.dir_path)
 
     
     # Get paths to every FF bin file in a directory 
@@ -476,9 +498,13 @@ if __name__ == "__main__":
 
 
     # Get extraction results
+    sigma_list = []
+    intensity_list = []
+    x_list = []
+    y_list = []
     for result in workpool.getResults():
 
-        x2, y2, amplitude, intensity = result
+        ff_name, x2, y2, amplitude, intensity, sigma_fitted = result
 
         # Skip if no stars were found
         if not x2:
@@ -494,6 +520,13 @@ if __name__ == "__main__":
         print('   ROW    COL   amplitude  intensity')
         for x, y, max_ampl, level in star_data:
             print(' {:06.2f} {:06.2f} {:6d} {:6d}'.format(round(y, 2), round(x, 2), int(max_ampl), int(level)))
+
+
+        # Store the star sigma to list
+        sigma_list += sigma_fitted.tolist()
+        intensity_list += intensity
+        x_list += x2
+        y_list += y2
 
 
         # # Show stars if there are only more then 10 of them
@@ -528,3 +561,89 @@ if __name__ == "__main__":
     workpool.deleteBackupFiles()
 
     print('Total time taken: ', time.clock() - time_start)
+
+
+    # Show the histogram of PSF stddevs
+    if cml_args.showstd:
+
+        print('Median:', np.median(sigma_list))
+
+        # Compute the bin number
+        nbins = int(np.ceil(np.sqrt(len(sigma_list))))
+        if nbins < 10:
+            nbins = 10
+
+        plt.hist(sigma_list, bins=nbins)
+
+        plt.xlabel('PSF $\sigma$')
+        plt.ylabel('Count')
+
+        plt.savefig(os.path.join(ff_dir, 'PSF_stddev_hist.png'), dpi=300)
+
+        plt.show()
+
+
+        # Plot stddev by intensity
+        
+        hexbin_grid = int(1.0/np.sqrt(2)*nbins)
+        lsp_list = -2.5*np.log10(np.array(intensity_list))
+        sigma_list = np.array(sigma_list)
+
+        # Compute plot limits
+        x_min = np.percentile(lsp_list[~np.isnan(lsp_list)], 0.5)
+        x_max = np.percentile(lsp_list[~np.isnan(lsp_list)], 99.5)
+        y_min = np.percentile(sigma_list[~np.isnan(sigma_list)], 0.5)
+        y_max = np.percentile(sigma_list[~np.isnan(sigma_list)], 99.5)
+
+        plt.hexbin(lsp_list, sigma_list, gridsize=(hexbin_grid, hexbin_grid), extent=(x_min, x_max, \
+            y_min, y_max))
+        plt.xlabel('Uncalibrated magnitude')
+        plt.ylabel('PSF $\sigma$')
+
+        plt.xlim(x_min, x_max)
+        plt.ylim(y_min, y_max)
+
+        plt.gca().invert_xaxis()
+
+        plt.savefig(os.path.join(ff_dir, 'PSF_stddev_vs_mag.png'), dpi=300)
+
+        plt.show()
+
+
+        # Plot stddev by X and Y
+        fig, (ax1, ax2) = plt.subplots(nrows=2)
+
+        x_min = np.min(x_list)
+        x_max = np.max(x_list)
+        ax1.hexbin(x_list, sigma_list, gridsize=(hexbin_grid, hexbin_grid), extent=(x_min, x_max, \
+            y_min, y_max))
+
+        
+        ax1.set_ylabel('PSF $\sigma$')
+        ax1.set_xlabel('X')
+
+        ax1.set_xlim(x_min, x_max)
+        ax1.set_ylim(y_min, y_max)
+
+
+        x_min = np.min(y_list)
+        x_max = np.max(y_list)
+        ax2.hexbin(y_list, sigma_list, gridsize=(hexbin_grid, hexbin_grid), extent=(x_min, x_max, \
+            y_min, y_max))
+
+        ax2.set_ylabel('PSF $\sigma$')
+        ax2.set_xlabel('Y')
+
+        ax2.set_xlim(x_min, x_max)
+        ax2.set_ylim(y_min, y_max)
+
+        plt.tight_layout()
+
+        plt.savefig(os.path.join(ff_dir, 'PSF_xy_vs_stddev.png'), dpi=300)
+
+        plt.show()
+
+
+
+
+

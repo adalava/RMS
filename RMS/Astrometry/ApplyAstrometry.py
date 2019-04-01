@@ -37,7 +37,7 @@ import scipy.optimize
 
 from RMS.Astrometry.Conversions import date2JD, datetime2JD, jd2Date
 from RMS.Astrometry.AtmosphericExtinction import atmosphericExtinctionCorrection
-from RMS.Formats.Platepar import Platepar
+import RMS.Formats.Platepar
 from RMS.Formats.FTPdetectinfo import readFTPdetectinfo, writeFTPdetectinfo
 from RMS.Formats.FFfile import filenameToDatetime
 from RMS.Math import angularSeparation
@@ -124,6 +124,44 @@ def computeFOVSize(platepar):
 
 
 
+# def rotationWrtHorizon(platepar):
+#     """ Given the platepar, compute the rotation of the FOV with respect to the horizon. 
+    
+#     Arguments:
+#         pletepar: [Platepar object] Input platepar.
+
+#     Return:
+#         rot_angle: [float] Rotation w.r.t. horizon (degrees).
+#     """
+
+#     # Image coordiantes of the center
+#     img_mid_w = platepar.X_res/2
+#     img_mid_h = platepar.Y_res/2
+
+#     # Image coordinate slighty up of the center
+#     img_up_w = img_mid_w
+#     img_up_h = img_mid_h - 10
+
+#     # Compute alt/az
+#     azim, alt = XY2altAz([img_mid_w, img_up_w], [img_mid_h, img_up_h], platepar.lat, platepar.lon, platepar.RA_d, \
+#         platepar.dec_d, platepar.Ho, platepar.X_res, platepar.Y_res, platepar.pos_angle_ref, \
+#         platepar.F_scale, platepar.x_poly_fwd, platepar.y_poly_fwd)
+#     azim_mid = azim[0]
+#     alt_mid = alt[0]
+#     azim_up = azim[1]
+#     alt_up = alt[1]
+
+#     # Compute the rotation wrt horizon (deg)    
+#     rot_angle = -np.degrees(np.arctan2(np.radians(alt_up) - np.radians(alt_mid), \
+#         np.radians(azim_up) - np.radians(azim_mid))) + 90
+
+#     # Wrap output to <-180, 180] range
+#     if rot_angle > 180:
+#         rot_angle -= 360
+
+#     return rot_angle
+
+
 def rotationWrtHorizon(platepar):
     """ Given the platepar, compute the rotation of the FOV with respect to the horizon. 
     
@@ -138,9 +176,9 @@ def rotationWrtHorizon(platepar):
     img_mid_w = platepar.X_res/2
     img_mid_h = platepar.Y_res/2
 
-    # Image coordinate slighty up of the center
-    img_up_w = img_mid_w
-    img_up_h = img_mid_h - 10
+    # Image coordinate slighty right of the center (horizontal)
+    img_up_w = img_mid_w + 10
+    img_up_h = img_mid_h
 
     # Compute alt/az
     azim, alt = XY2altAz([img_mid_w, img_up_w], [img_mid_h, img_up_h], platepar.lat, platepar.lon, platepar.RA_d, \
@@ -152,8 +190,8 @@ def rotationWrtHorizon(platepar):
     alt_up = alt[1]
 
     # Compute the rotation wrt horizon (deg)    
-    rot_angle = -np.degrees(np.arctan2(np.radians(alt_up) - np.radians(alt_mid), \
-        np.radians(azim_up) - np.radians(azim_mid))) + 90
+    rot_angle = np.degrees(np.arctan2(np.radians(alt_up) - np.radians(alt_mid), \
+        np.radians(azim_up) - np.radians(azim_mid)))
 
     # Wrap output to <-180, 180] range
     if rot_angle > 180:
@@ -200,6 +238,82 @@ def rotationWrtHorizonToPosAngle(platepar, rot_angle):
     return res.x[0]%360
 
 
+
+
+def rotationWrtStandard(platepar):
+    """ Given the platepar, compute the rotation from the celestial meridian passing through the centre of 
+        the FOV.
+    
+    Arguments:
+        pletepar: [Platepar object] Input platepar.
+
+    Return:
+        rot_angle: [float] Rotation from the meridian (degrees).
+    """
+
+    # Image coordiantes of the center
+    img_mid_w = platepar.X_res/2
+    img_mid_h = platepar.Y_res/2
+
+    # Image coordinate slighty right of the centre
+    img_up_w = img_mid_w + 10
+    img_up_h = img_mid_h
+
+    # Compute ra/dec
+    _, ra, dec, _ = XY2CorrectedRADecPP(2*[jd2Date(platepar.JD)], [img_mid_w, img_up_w], [img_mid_h, img_up_h], \
+        2*[1], platepar)
+    ra_mid = ra[0]
+    dec_mid = dec[0]
+    ra_up = ra[1]
+    dec_up = dec[1]
+
+    # Compute the equatorial orientation
+    rot_angle = np.degrees(np.arctan2(np.radians(dec_mid) - np.radians(dec_up), \
+        np.radians(ra_mid) - np.radians(ra_up)))
+
+    # Wrap output to 0-360 range
+    rot_angle = rot_angle%360
+
+    return rot_angle
+
+
+
+
+def rotationWrtStandardToPosAngle(platepar, rot_angle):
+    """ Given the rotation angle w.r.t horizon, numerically compute the position angle. 
+    
+    Arguments:
+        pletepar: [Platepar object] Input platepar.
+        rot_angle: [float] The rotation angle w.r.t. horizon (deg)>
+
+    Return:
+        pos_angle: [float] Position angle (deg).
+
+    """
+
+    platepar = copy.deepcopy(platepar)
+    rot_angle = rot_angle%360
+
+
+    def _rotAngleResidual(params, rot_angle):
+
+        # Set the given position angle to the platepar
+        platepar.pos_angle_ref = params[0]
+
+        # Compute the rotation angle with the given guess of the position angle
+        rot_angle_computed = rotationWrtStandard(platepar)%360
+
+        # Compute the deviation between computed and desired angle
+        return 180 - abs(abs(rot_angle - rot_angle_computed) - 180)
+
+
+
+    # Numerically find the position angle
+    res = scipy.optimize.minimize(_rotAngleResidual, [platepar.pos_angle_ref], args=(rot_angle), \
+        method='Nelder-Mead')
+
+
+    return res.x[0]%360
 
 
 
@@ -262,7 +376,7 @@ def applyFieldCorrection(x_poly_fwd, y_poly_fwd, X_res, Y_res, F_scale, X_data, 
         y_poly_fwd: [ndarray] 1D numpy array of 12 elements containing forward Y axis polynomial parameters.
         X_res: [int] Image size, X dimension (px).
         Y_res: [int] Image size, Y dimenstion (px).
-        F_scale: [float] Sum of image scales per each image axis (arcsec per px).
+        F_scale: [float] Sum of image scales per each image axis (px/deg).
         X_data: [ndarray] 1D float numpy array containing X component of the detection point.
         Y_data: [ndarray] 1D float numpy array containing Y component of the detection point.
     
@@ -348,7 +462,7 @@ def XY2altAz(X_data, Y_data, lat, lon, RA_d, dec_d, Ho, X_res, Y_res, pos_angle_
         X_res: [int] Image size, X dimension (px).
         Y_res: [int] Image size, Y dimenstion (px).
         pos_angle_ref: [float] Field rotation parameter (degrees).
-        F_scale: [float] Sum of image scales per each image axis (arcsec per px).
+        F_scale: [float] Sum of image scales per each image axis (px/deg).
         x_poly_fwd: [ndarray] 1D numpy array of 12 elements containing forward X axis polynomial parameters.
         y_poly_fwd: [ndarray] 1D numpy array of 12 elements containing forward Y axis polynomial parameters.
         
@@ -823,7 +937,7 @@ def applyAstrometryFTPdetectinfo(dir_path, ftp_detectinfo_file, platepar_file, U
     if platepar is None:
 
         # Load the platepar
-        platepar = Platepar()
+        platepar = RMS.Formats.Platepar.Platepar()
         platepar.read(os.path.join(dir_path, platepar_file))
 
 
@@ -953,7 +1067,7 @@ if __name__ == "__main__":
     # # TEST CONVERSION FUNCTIONS
 
     # # Load the platepar
-    # platepar = Platepar()
+    # platepar = RMS.Formats.Platepar.Platepar()
     # platepar.read("/home/dvida/Desktop/HR000A_20181214_170136_990012_detected/platepar_cmn2010.cal")
 
     # from RMS.Formats.FFfile import getMiddleTimeFF

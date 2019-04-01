@@ -14,8 +14,11 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import print_function, division, absolute_import
+
 import os
 import sys
+import math
 
 try:
     # Python 3
@@ -115,6 +118,88 @@ def findBinaryPath(dir_path, binary_name, binary_extension):
 
 
 
+def loadConfigFromDirectory(cml_args_config, dir_path):
+    """ Given an input from argparse for the config file and the current directory, return the proper config
+        file to load. 
+
+    Arguments:
+        cml_args_confg: [None/str/list] Input from cml_args.confg from argparse.
+        dir_path: [list or str] Path to the working directory, or multiple paths.
+
+    Return:
+        config: [Config instance] Loaded config file.
+
+    """
+
+    # If the dir path is given as a string, use that dir path
+    if isinstance(dir_path, str):
+        pass
+
+    # If dir path is a list with more than 1 entry, take the parent directory of the first directory in the 
+    # list
+    else:
+
+        # If there are more than 1 element, take the parent of the 1st
+        if len(dir_path) > 1:
+            dir_path = os.path.join(os.path.abspath(dir_path), os.pardir)
+
+        # Otherwise, take the one and only path in the list
+        else:
+            dir_path = dir_path[0]
+
+
+    # If the given path is a file, take the parent
+    if os.path.isfile(dir_path):
+        dir_path = os.path.dirname(dir_path)
+
+
+    if cml_args_config is not None:
+
+        config_file = None
+
+        # If the config should be taken from the data directory, find it and load it. The config will be
+        #   loaded only if there's one file with '.config' in the directory
+        if cml_args_config[0] == '.':
+
+            # Locate all files in the data directory that have '.config' in them
+            config_files = [file_name for file_name in os.listdir(dir_path) if '.config' in file_name]
+
+            # If there is exactly one config file, use it
+            if len(config_files) == 1:
+                config_file = os.path.join(os.path.abspath(dir_path), config_files[0])
+
+            else:
+                print('There are several config files in the given directory, choose one and provide the full path to it:')
+                for cfile in config_files:
+                    print('    {:s}'.format(os.path.join(dir_path, cfile)))
+
+        else:
+            # Load the config file from the full path
+            config_file = os.path.abspath(cml_args_config[0].replace('"', ''))
+
+
+        if config_file is None:
+            print('The config file could not be found!')
+            sys.exit()
+
+
+
+        print('Loading config file:', config_file)
+
+        # Load the given config file
+        config = parse(config_file)
+
+    # If the config file is not given, load the default config file
+    else:
+        # Load the default configuration file
+        config = parse(".config")
+
+
+    return config
+
+
+
+
 class Config:
     def __init__(self):
 
@@ -124,6 +209,10 @@ class Config:
         self.longitude = 0
         self.elevation = 0
         self.cams_code = 0
+
+        self.external_script_run = False
+        self.external_script_path = None
+        self.external_function_name = "rmsExternal"
         
         ##### Capture
         self.deviceID = 0
@@ -156,6 +245,7 @@ class Config:
         self.mask_file = "mask.bmp"
 
         self.data_dir = "~/RMS_data"
+        self.log_dir = "logs"
         self.captured_dir = "CapturedFiles"
         self.archived_dir = "ArchivedFiles"
 
@@ -225,8 +315,11 @@ class Config:
         ##### MeteorDetection
         
         # KHT detection parameters
-        self.ff_min_stars = 5
+        self.ff_min_stars = 10
         
+        self.detection_binning_factor = 1
+        self.detection_binning_method = 'avg'
+
         self.k1_det = 1.5 # weight for stddev in thresholding for faint meteor detection
         self.j1_det = 9 # absolute levels above average in thresholding for faint meteor detection
         self.max_white_ratio = 0.07 # maximum ratio of white to all pixels on a thresholded image (used to avoid searching on very messed up images)
@@ -261,6 +354,8 @@ class Config:
         self.ang_vel_min = 0.5
         self.ang_vel_max = 35.0
 
+        # By default the peak of the meteor should be at least 16x brighter than the background. This is the multiplier that scales this number (1.0 = 16x).
+        self.min_patch_intensity_multiplier = 1.0
 
         ##### StarExtraction
 
@@ -278,13 +373,18 @@ class Config:
 
 
         ##### Calibration
-        self.use_flat = True
+        self.use_flat = False
         self.flat_file = 'flat.bmp'
         self.flat_min_imgs = 20
 
+        self.use_dark = False
+        self.dark_file = 'dark.bmp'
+
         self.star_catalog_path = 'Catalogs'
         self.star_catalog_file = 'gaia_dr2_mag_11.5.npy'
-        self.star_catalog_band_ratios = [0.0, 1.0, 0.0, 0.0]
+
+        # BVRI band ratios for GAIA G band and Sony CMOS cameras
+        self.star_catalog_band_ratios = [0.45, 0.70, 0.72, 0.50]
 
         self.platepar_name = 'platepar_cmn2010.cal'
 
@@ -292,7 +392,6 @@ class Config:
         self.platepar_remote_name = 'platepar_latest.cal'
         self.remote_platepar_dir = 'platepars'
 
-        self.catalog_extraction_radius = 40.0 #deg
         self.catalog_mag_limit = 4.5
 
         self.calstars_files_N = 400 # How many calstars FF files to evaluate
@@ -302,13 +401,7 @@ class Config:
         self.dist_check_threshold = 0.33 # Minimum acceptable calibration residual (px)
         self.dist_check_quick_threshold = 0.4 # Threshold for quick recalibration
 
-        self.stars_NN_radius = 10.0 # deg
-        self.refinement_star_NN_radius = 0.125 #deg
-        self.rotation_param_range = 5.0 # deg
         self.min_matched_stars = 7
-        self.max_initial_iterations = 20
-
-        self.min_estimation_value = 0.4 # Minimum estimation parameter when to stop the iteration
 
 
         ##### Thumbnails
@@ -317,15 +410,40 @@ class Config:
         self.thumb_n_width = 10
 
 
-def normalizeParameter(param, config):
-    """ Normalize detection parameter to be size independent.
+def normalizeParameter(param, config, binning=1):
+    """ Normalize detection parameters for fireball detection to be size independent.
     
-    @param param: parameter to be normalized
-    
-    @return: normalized param
+    Arguments:
+        param: [float] parameter to be normalized
+        config: [Config]
+        binning: [int] Bin multiplier.
+        
+    Return:
+        normalized param
     """
 
-    return param*config.width/config.f*config.height/config.f/(720*576)
+    width_factor = config.width/binning/config.f/720
+    height_factor = config.height/binning/config.f/576
+
+    return param*width_factor*height_factor
+
+
+def normalizeParameterMeteor(param, config, binning=1):
+    """ Normalize detection parameters for fireball detection to be size independent.
+    
+    Arguments:
+        param: [float] parameter to be normalized
+        config: [Config]
+        binning: [int] Bin multiplier.
+        
+    Return:
+        normalized param
+    """
+
+    width_factor = config.width/binning/720
+    height_factor = config.height/binning/576
+
+    return param*width_factor*height_factor
 
 
 def parse(filename):
@@ -387,6 +505,15 @@ def parseSystem(config, parser):
     if parser.has_option(section, "cams_code"):
         config.cams_code = parser.getint(section, "cams_code")
 
+    if parser.has_option(section, "external_script_run"):
+        config.external_script_run = parser.getboolean(section, "external_script_run")
+
+    if parser.has_option(section, "external_script_path"):
+        config.external_script_path = parser.get(section, "external_script_path")
+
+    if parser.has_option(section, "external_function_name"):
+        config.external_function_name = parser.get(section, "external_function_name")
+        
 
 
 def parseCapture(config, parser):
@@ -410,6 +537,9 @@ def parseCapture(config, parser):
             
             config.data_dir = os.path.join(os.path.expanduser('~'), config.data_dir)
     
+
+    if parser.has_option(section, "log_dir"):
+        config.log_dir = parser.get(section, "log_dir")
 
     if parser.has_option(section, "captured_dir"):
         config.captured_dir = parser.get(section, "captured_dir")
@@ -509,6 +639,13 @@ def parseCapture(config, parser):
 
     if parser.has_option(section, "fov_h"):
         config.fov_h = parser.getfloat(section, "fov_h")
+
+
+    if (config.fov_w <= 0) or (config.fov_h <= 0):
+        print('The field of view in the config file (fov_h and fov_w) have to be positive numbers!')
+        print('Make sure to set the approximate FOV size correctly!')
+        sys.exit()
+
 
     if parser.has_option(section, "deinterlace_order"):
         config.deinterlace_order = parser.getint(section, "deinterlace_order")
@@ -682,6 +819,33 @@ def parseMeteorDetection(config, parser):
 
     if parser.has_option(section, "ff_min_stars"):
         config.ff_min_stars = parser.getint(section, "ff_min_stars")
+
+
+    if parser.has_option(section, "detection_binning_factor"):
+        bin_factor = parser.getint(section, "detection_binning_factor")
+        # config.detection_binning_factor
+
+        # Check that the given bin size is a factor of 2
+        if bin_factor > 1:
+            if math.log(bin_factor, 2)/int(math.log(bin_factor, 2)) != 1:
+                print('Warning! The given binning factor is not a factor of 2!')
+                print('Defaulting to 1...')
+                bin_factor = 1
+        
+        config.detection_binning_factor = bin_factor
+
+
+    if parser.has_option(section, "detection_binning_method"):
+        bin_method = parser.get(section, "detection_binning_method").strip().lower()
+
+        bin_method_list = ['sum', 'avg']
+        if bin_method not in bin_method_list:
+            print('Warning! The binning method {:s} is not an allowed binning method: ', bin_method_list)
+            print('Defaulting to avg...')
+            bin_method = 'avg'
+
+        config.detection_binning_method = bin_method
+
     
     if parser.has_option(section, "k1"):
         config.k1_det = parser.getfloat(section, "k1")
@@ -704,15 +868,38 @@ def parseMeteorDetection(config, parser):
     if parser.has_option(section, "line_min_dist"):
         config.line_min_dist = parser.getint(section, "line_min_dist")
 
+
+    # Parse the distance threshold
     if parser.has_option(section, "distance_threshold_det"):
         config.distance_threshold_det = parser.getint(section, "distance_threshold_det")**2
 
-    config.distance_threshold_det = normalizeParameter(config.distance_threshold_det, config)
 
+    # If the distance is > 20 (in old configs before the scaling fix), rescale using the old function
+    if config.distance_threshold_det > 20**2:
+
+        config.distance_threshold_det = normalizeParameter(config.distance_threshold_det, config, \
+            binning=config.detection_binning_factor)
+    else:
+
+        config.distance_threshold_det = normalizeParameterMeteor(config.distance_threshold_det, config, \
+            binning=config.detection_binning_factor)
+
+
+    # Parse the gap threshold
     if parser.has_option(section, "gap_threshold_det"):
         config.gap_threshold_det = parser.getint(section, "gap_threshold_det")**2
 
-    config.gap_threshold_det = normalizeParameter(config.gap_threshold_det, config)
+    # If the gap is > 100px (in old configs before the scaling fix), rescale using the old function
+    if config.gap_threshold > 100**2:
+
+        config.gap_threshold_det = normalizeParameter(config.gap_threshold_det, config, \
+            binning=config.detection_binning_factor)
+
+    else:
+        config.gap_threshold_det = normalizeParameterMeteor(config.gap_threshold_det, config, \
+            binning=config.detection_binning_factor)
+
+
 
     if parser.has_option(section, "min_pixels_det"):
         config.min_pixels_det = parser.getint(section, "min_pixels_det")
@@ -770,6 +957,10 @@ def parseMeteorDetection(config, parser):
         config.ang_vel_max = parser.getfloat(section, "ang_vel_max")
 
 
+    if parser.has_option(section, "min_patch_intensity_multiplier"):
+        config.min_patch_intensity_multiplier = parser.getfloat(section, "min_patch_intensity_multiplier")
+
+
 
 
 def parseStarExtraction(config, parser):
@@ -819,6 +1010,15 @@ def parseCalibration(config, parser):
     if parser.has_option(section, "flat_min_imgs"):
         config.flat_min_imgs = parser.getint(section, "flat_min_imgs")
 
+
+    if parser.has_option(section, "use_dark"):
+        config.use_dark = parser.getboolean(section, "use_dark")
+
+    if parser.has_option(section, "dark_file"):
+        config.dark_file = parser.get(section, "dark_file")
+
+
+
     if parser.has_option(section, "star_catalog_path"):
         config.star_catalog_path = parser.get(section, "star_catalog_path")
 
@@ -842,9 +1042,6 @@ def parseCalibration(config, parser):
     if parser.has_option(section, "remote_platepar_dir"):
         config.remote_platepar_dir = parser.get(section, "remote_platepar_dir")
 
-    if parser.has_option(section, "catalog_extraction_radius"):
-        config.catalog_extraction_radius = parser.getfloat(section, "catalog_extraction_radius")
-
     if parser.has_option(section, "catalog_mag_limit"):
         config.catalog_mag_limit = parser.getfloat(section, "catalog_mag_limit")
 
@@ -860,23 +1057,8 @@ def parseCalibration(config, parser):
     if parser.has_option(section, "calstars_min_stars"):
         config.calstars_min_stars = parser.getint(section, "calstars_min_stars")
 
-    if parser.has_option(section, "stars_NN_radius"):
-        config.stars_NN_radius = parser.getfloat(section, "stars_NN_radius")
-
-    if parser.has_option(section, "refinement_star_NN_radius"):
-        config.refinement_star_NN_radius = parser.getfloat(section, "refinement_star_NN_radius")
-
-    if parser.has_option(section, "rotation_param_range"):
-        config.rotation_param_range = parser.getfloat(section, "rotation_param_range")
-
     if parser.has_option(section, "min_matched_stars"):
         config.min_matched_stars = parser.getint(section, "min_matched_stars")
-
-    if parser.has_option(section, "max_initial_iterations"):
-        config.max_initial_iterations = parser.getint(section, "max_initial_iterations")
-
-    if parser.has_option(section, "min_estimation_value"):
-        config.min_estimation_value = parser.getfloat(section, "min_estimation_value")
 
 
 
