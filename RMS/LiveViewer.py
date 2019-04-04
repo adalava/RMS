@@ -20,6 +20,10 @@ except:
     import Tkinter as tkinter
 
 
+# Load the default font
+PIL_FONT = ImageFont.load_default()
+
+
 def drawText(ff_array, img_text):
     """ Draws text on the image represented as a numpy array.
 
@@ -30,11 +34,8 @@ def drawText(ff_array, img_text):
     im = im.convert('RGB')
     draw = ImageDraw.Draw(im)
 
-    # Load the default font
-    font = ImageFont.load_default()
-
     # Draw the text on the image, in the upper left corent
-    draw.text((0, 0), img_text, (255,255,0), font=font)
+    draw.text((0, 0), img_text, (255,255,0), font=PIL_FONT)
     draw = ImageDraw.Draw(im)
 
     # Convert the type of the image to grayscale, with one color
@@ -60,7 +61,7 @@ class LiveViewer(multiprocessing.Process):
 
         super(LiveViewer, self).__init__()
         
-        self.img_queue = multiprocessing.Queue()
+        self.recv_conn, self.send_conn = multiprocessing.Pipe(duplex=False)
         self.window_name = window_name
         self.first_image = True
         self.run_exited = multiprocessing.Event()
@@ -86,21 +87,31 @@ class LiveViewer(multiprocessing.Process):
             
         """
 
-        self.img_queue.put([img, img_text])
+        self.send_conn.send([img, img_text])
 
         time.sleep(0.1)
 
 
 
     def run(self):
-        """ Keep updating the image on the screen from the queue. """
+        """ Keep updating the image on the screen from the pipe. """
+
+        # # Find the screen size
+        # root = tkinter.Tk()
+        # root.withdraw()
+
+        # screen_w = root.winfo_screenwidth()
+        # screen_h = root.winfo_screenheight()
+
+        # root.destroy()
+        # del root
 
 
         # Repeat until the live viewer is not stopped from the outside
         while True:
 
-            # Get the next element in the queue (blocking, until next element is available)
-            item = self.img_queue.get(block=True)
+            # Get the next element in the pipe (blocking, until next element is available)
+            item = self.recv_conn.recv()
 
             # If the 'poison pill' is received, exit the viewer
             if item is None:
@@ -110,31 +121,20 @@ class LiveViewer(multiprocessing.Process):
 
             img, img_text = item
 
+            # # If the screen is smaller than the image, resize the image
+            # if (screen_h < img.shape[0]) or (screen_w < img.shape[1]):
 
-            # Find the screen size
-            root = tkinter.Tk()
-            root.withdraw()
+            #     # Find the ratios between dimentions
+            #     y_ratio = screen_h/img.shape[0]
+            #     x_ratio = screen_w/img.shape[1]
 
-            screen_w = root.winfo_screenwidth()
-            screen_h = root.winfo_screenheight()
+            #     # Resize the image so that the image fits the screen
+            #     min_ratio = min(x_ratio, y_ratio)
 
-            root.destroy()
-            del root
+            #     width_new = int(img.shape[1]*min_ratio)
+            #     height_new = int(img.shape[0]*min_ratio)
 
-            # If the screen is smaller than the image, resize the image
-            if (screen_h < img.shape[0]) or (screen_w < img.shape[1]):
-
-                # Find the ratios between dimentions
-                y_ratio = screen_h/img.shape[0]
-                x_ratio = screen_w/img.shape[1]
-
-                # Resize the image so that the image fits the screen
-                min_ratio = min(x_ratio, y_ratio)
-
-                width_new = int(img.shape[1]*min_ratio)
-                height_new = int(img.shape[0]*min_ratio)
-
-                img = cv2.resize(img, (width_new, height_new))
+            #     img = cv2.resize(img, (width_new, height_new))
 
 
 
