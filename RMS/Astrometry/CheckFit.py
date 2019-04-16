@@ -31,9 +31,24 @@ pyximport.install(setup_args={'include_dirs':[np.get_include()]})
 from RMS.Astrometry.CyFunctions import matchStars, subsetCatalog, cyRaDecToCorrectedXY
 
 
+def computeMinimizationTolerances(config, platepar, star_dict_len):
+    """ Compute tolerances for minimization. """
+
+        # Calculate the function tolerance, so the desired precision can be reached (the number is calculated
+    # in the same regard as the cost function)
+    fatol = (config.dist_check_threshold**2)/np.sqrt(star_dict_len*config.min_matched_stars + 1)
+
+    # Parameter estimation tolerance for angular values
+    fov_w = platepar.X_res/platepar.F_scale
+    xatol_ang = config.dist_check_threshold*fov_w/platepar.X_res
+
+    return fatol, xatol_ang
+
+
+
 
 def matchStarsResiduals(config, platepar, catalog_stars, star_dict, match_radius, ret_nmatch=False, \
-    sky_coords=False, lim_mag=None):
+    sky_coords=False, lim_mag=None, verbose=True):
     """ Match the image and catalog stars with the given astrometry solution and estimate the residuals 
         between them.
     
@@ -52,6 +67,7 @@ def matchStarsResiduals(config, platepar, catalog_stars, star_dict, match_radius
         sky_coords: [bool] If True, sky coordinate residuals in RA, dec will be used to compute the cost,
             function, not image coordinates.
         lim_mag: [float] Override the limiting magnitude from config. None by default.
+        verbose: [bool] Print results. True by default.
 
     Return:
         cost: [float] The cost function which weights the number of matched stars and the average deviation.
@@ -231,10 +247,12 @@ def matchStarsResiduals(config, platepar, catalog_stars, star_dict, match_radius
 
     cost = (avg_dist**2)*(1.0/np.sqrt(n_matched + 1))
 
-    print('Matched {:d} stars with radius of {:.2f} px'.format(n_matched, match_radius))
-    print('Avg dist', avg_dist, unit_label)
-    print('Cost:', cost)
-    print('-----')
+    if verbose:
+
+        print('Matched {:d} stars with radius of {:.2f} px'.format(n_matched, match_radius))
+        print('Avg dist', avg_dist, unit_label)
+        print('Cost:', cost)
+        print('-----')
 
 
     if ret_nmatch:
@@ -323,7 +341,8 @@ def checkFitGoodness(config, platepar, catalog_stars, star_dict, match_radius):
 
 
 
-def _calcImageResidualsAstro(params, config, platepar, catalog_stars, star_dict, match_radius):
+def _calcImageResidualsAstro(params, config, platepar, catalog_stars, star_dict, match_radius, \
+    fit_distorsion):
     """ Calculates the differences between the stars on the image and catalog stars in image coordinates with 
         the given astrometrical solution. 
     """
@@ -332,8 +351,12 @@ def _calcImageResidualsAstro(params, config, platepar, catalog_stars, star_dict,
     # Make a copy of the platepar
     pp = copy.deepcopy(platepar)
 
-    # Extract fitting parameters
-    ra_ref, dec_ref, pos_angle_ref, F_scale = params
+    # Extract fitting parameters (if the distorsion is fit as well, fit the scale, otherwise keep it fixed)
+    if fit_distorsion:
+        ra_ref, dec_ref, pos_angle_ref, F_scale = params
+    else:
+        ra_ref, dec_ref, pos_angle_ref = params
+        F_scale = pp.F_scale
 
     # Set the fitting parameters to the platepar clone
     pp.RA_d = ra_ref
@@ -342,7 +365,7 @@ def _calcImageResidualsAstro(params, config, platepar, catalog_stars, star_dict,
     pp.F_scale = F_scale
 
     # Match stars and calculate image residuals
-    return matchStarsResiduals(config, pp, catalog_stars, star_dict, match_radius)
+    return matchStarsResiduals(config, pp, catalog_stars, star_dict, match_radius, verbose=False)
 
 
 
@@ -364,7 +387,7 @@ def _calcImageResidualsDistorsion(params, config, platepar, catalog_stars, star_
     print('{:s} reverse distortion params:'.format(dimension))
 
     # Match stars and calculate the cost function using image coordinates
-    return matchStarsResiduals(config, pp, catalog_stars, star_dict, match_radius)
+    return matchStarsResiduals(config, pp, catalog_stars, star_dict, match_radius, verbose=False)
 
 
 def _calcSkyResidualsDistorsion(params, config, platepar, catalog_stars, star_dict, match_radius, \
@@ -544,19 +567,16 @@ def autoCheckFit(config, platepar, calstars_list, distorsion_refinement=False):
     # A list of matching radiuses to try, pairs of [radius, fit_distorsion_flag]
     #   The distorsion will be fitted only if explicity requested
     min_radius = 0.5
-    radius_list = [[10, False and distorsion_refinement], 
-                    [5, False and distorsion_refinement], 
-                    [3, False and distorsion_refinement],
+    radius_list = [[10, False], 
+                    [5, False], 
+                    [3, False],
                     [1.5, True and distorsion_refinement], 
                     [min_radius, True and distorsion_refinement]]
 
-    # Calculate the function tolerance, so the desired precision can be reached (the number is calculated
-    # in the same reagrd as the cost function)
-    fatol = (config.dist_check_threshold**2)/np.sqrt(len(star_dict)*config.min_matched_stars + 1)
 
-    # Parameter estimation tolerance for angular values
-    fov_w = platepar.X_res/platepar.F_scale
-    xatol_ang = config.dist_check_threshold*fov_w/platepar.X_res
+    # Calculate the function tolerance, so the desired precision can be reached (the number is calculated
+    # in the same regard as the cost function)
+    fatol, xatol_ang = computeMinimizationTolerances(config, platepar, len(star_dict))
 
 
     ### If the initial match is good enough, do only quick recalibratoin ###
@@ -571,8 +591,8 @@ def autoCheckFit(config, platepar, calstars_list, distorsion_refinement=False):
         if avg_dist < config.dist_check_quick_threshold:
 
             # Use a reduced set of initial radius values
-            radius_list = [[1.5, True and distorsion_refinement], [min_radius, \
-                True and distorsion_refinement]]
+            radius_list = [[1.5, True and distorsion_refinement], 
+                           [min_radius, True and distorsion_refinement]]
 
     ##########
 
@@ -607,12 +627,15 @@ def autoCheckFit(config, platepar, calstars_list, distorsion_refinement=False):
             return platepar, True
 
 
-        # Initial parameters for the astrometric fit
-        p0 = [platepar.RA_d, platepar.dec_d, platepar.pos_angle_ref, platepar.F_scale]
+        # Initial parameters for the astrometric fit (don't fit the scale if the distorsion is not being fit)
+        if fit_distorsion:
+            p0 = [platepar.RA_d, platepar.dec_d, platepar.pos_angle_ref, platepar.F_scale]
+        else:
+            p0 = [platepar.RA_d, platepar.dec_d, platepar.pos_angle_ref]
 
         # Fit the astrometric parameters
         res = scipy.optimize.minimize(_calcImageResidualsAstro, p0, args=(config, platepar, catalog_stars, \
-            star_dict, match_radius), method='Nelder-Mead', \
+            star_dict, match_radius, fit_distorsion), method='Nelder-Mead', \
             options={'fatol': fatol, 'xatol': xatol_ang})
 
         print(res)
@@ -624,7 +647,12 @@ def autoCheckFit(config, platepar, calstars_list, distorsion_refinement=False):
 
         else:
             # If the fit was successful, use the new parameters from now on
-            ra_ref, dec_ref, pos_angle_ref, F_scale = res.x
+            if fit_distorsion:
+                ra_ref, dec_ref, pos_angle_ref, F_scale = res.x
+
+            else:
+                ra_ref, dec_ref, pos_angle_ref = res.x
+                F_scale = platepar.F_scale
 
             platepar.RA_d = ra_ref
             platepar.dec_d = dec_ref

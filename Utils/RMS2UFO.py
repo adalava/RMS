@@ -2,16 +2,18 @@
 
 from __future__ import print_function, division, absolute_import
 
+from __future__ import print_function, division, absolute_import
+
 import os
 import argparse
 import datetime
 
 import numpy as np
 
-from RMS.Astrometry.ApplyAstrometry import altAz2RADec
+import RMS.Astrometry.ApplyAstrometry
 from RMS.Formats import FTPdetectinfo
 from RMS.Formats import FFfile
-from RMS.Formats.Platepar import Platepar
+from RMS.Formats import Platepar
 from RMS.Formats import UFOOrbit
 from RMS import Math
 
@@ -19,13 +21,17 @@ from RMS.Routines import GreatCircle
 
 
 
-def FTPdetectinfo2UFOOrbitInput(dir_path, file_name, platepar_path):
+def FTPdetectinfo2UFOOrbitInput(dir_path, file_name, platepar_path, platepar_dict=None):
     """ Convert the FTPdetectinfo file into UFOOrbit input CSV file. 
         
     Arguments:
         dir_path: [str] Path of the directory which contains the FTPdetectinfo file.
         file_name: [str] Name of the FTPdetectinfo file.
         platepar_path: [str] Full path to the platepar file.
+
+    Keyword arguments:
+        platepar_dict: [dict] Dictionary of Platepar instances where keys are FF file names. This will be 
+            used instead of the platepar at platepar_path. None by default.
     """
 
     # Load the FTPdetecinfo file
@@ -33,8 +39,10 @@ def FTPdetectinfo2UFOOrbitInput(dir_path, file_name, platepar_path):
 
 
     # Load the platepar file
-    pp = Platepar()
-    pp.read(platepar_path)
+    if platepar_dict is None:
+
+        pp = Platepar.Platepar()
+        pp.read(platepar_path)
 
 
     # Init the UFO format list
@@ -46,6 +54,13 @@ def FTPdetectinfo2UFOOrbitInput(dir_path, file_name, platepar_path):
         ff_name, cam_code, meteor_No, n_segments, fps, hnr, mle, binn, px_fm, rho, phi, \
             meteor_meas = meteor
 
+        # Load the platepar from the platepar dictionary, if given
+        if platepar_dict is not None:
+            if ff_name in platepar_dict:
+                pp = platepar_dict[ff_name]
+
+            else:
+                print('Skipping {:s} becuase no platepar was found for this FF file!'.format(ff_name))
 
         # Convert the FF file name into time
         dt = FFfile.filenameToDatetime(ff_name)
@@ -100,8 +115,10 @@ def FTPdetectinfo2UFOOrbitInput(dir_path, file_name, platepar_path):
         azim2 = (90 - np.degrees(azim2))%360
 
         # Compute RA/Dec from Alt/Az
-        _, ra1, dec1 = altAz2RADec(pp.lat, pp.lon, pp.UT_corr, [dt1], [azim1], [alt1], dt_time=True)
-        _, ra2, dec2 = altAz2RADec(pp.lat, pp.lon, pp.UT_corr, [dt2], [azim2], [alt2], dt_time=True)
+        _, ra1, dec1 = RMS.Astrometry.ApplyAstrometry.altAz2RADec(pp.lat, pp.lon, pp.UT_corr, [dt1], \
+            [azim1], [alt1], dt_time=True)
+        _, ra2, dec2 = RMS.Astrometry.ApplyAstrometry.altAz2RADec(pp.lat, pp.lon, pp.UT_corr, [dt2], \
+            [azim2], [alt2], dt_time=True)
 
 
         ### ###

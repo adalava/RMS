@@ -31,6 +31,7 @@ import math
 import datetime
 import shutil
 import copy
+import argparse
 
 import numpy as np
 import scipy.optimize
@@ -41,6 +42,7 @@ import RMS.Formats.Platepar
 from RMS.Formats.FTPdetectinfo import readFTPdetectinfo, writeFTPdetectinfo
 from RMS.Formats.FFfile import filenameToDatetime
 from RMS.Math import angularSeparation
+import Utils.RMS2UFO
 
 # Import Cython functions
 import pyximport
@@ -908,6 +910,93 @@ def raDecToCorrectedXYPP(RA_data, dec_data, jd, platepar):
 
 
 
+def applyPlateparToCentroids(ff_name, fps, meteor_meas, platepar, add_calstatus=False):
+    """ Given the meteor centroids and a platepar file, compute meteor astrometry and photometry (RA/Dec, 
+        alt/az, mag).
+
+    Arguments:
+        ff_name: [str] Name of the FF file with the meteor.
+        fps: [float] Frames per second of the video.
+        meteor_meas: [list] A list of [calib_status, frame_n, x, y, ra, dec, azim, elev, inten, mag].
+        platepar: [Platepar instance] Platepar which will be used for astrometry and photometry.
+
+    Keyword arguments:
+        add_calstatus: [bool] Add a column with calibration status at the beginning. False by default.
+
+    Return:
+        meteor_picks: [ndarray] A numpy 2D array of: [frames, X_data, Y_data, RA_data, dec_data, az_data, 
+        alt_data, level_data, magnitudes]
+
+    """
+
+
+    meteor_meas = np.array(meteor_meas)
+
+    # Add a line which is indicating the calibration status
+    if add_calstatus:
+        meteor_meas = np.c_[np.ones((meteor_meas.shape[0], 1)), meteor_meas]
+
+
+    # Remove all entries where levels are equal to or smaller than 0
+    level_data = meteor_meas[:, 8]
+    meteor_meas = meteor_meas[level_data > 0, :]
+
+    # Extract frame number, x, y, intensity
+    frames = meteor_meas[:, 1]
+    X_data = meteor_meas[:, 2]
+    Y_data = meteor_meas[:, 3]
+    level_data = meteor_meas[:, 8]
+
+    # Get the beginning time of the FF file
+    time_beg = filenameToDatetime(ff_name)
+
+    # Calculate time data of every point
+    time_data = []
+    for frame_n in frames:
+        t = time_beg + datetime.timedelta(seconds=frame_n/fps)
+        time_data.append([t.year, t.month, t.day, t.hour, t.minute, t.second, int(t.microsecond/1000)])
+
+
+
+    # Convert image cooredinates to RA and Dec, and do the photometry
+    JD_data, RA_data, dec_data, magnitudes = XY2CorrectedRADecPP(np.array(time_data), X_data, Y_data, \
+        level_data, platepar)
+
+
+    # Compute azimuth and altitude of centroids
+    az_data = np.zeros_like(RA_data)
+    alt_data = np.zeros_like(RA_data)
+
+    for i in range(len(az_data)):
+
+        jd = JD_data[i]
+        ra_tmp = RA_data[i]
+        dec_tmp = dec_data[i]
+
+        # Alt and az are kept in the J2000 epoch, which is the CAMS standard!
+        az_tmp, alt_tmp = raDec2AltAz(jd, platepar.lon, platepar.lat, ra_tmp, dec_tmp)
+
+        az_data[i] = az_tmp
+        alt_data[i] = alt_tmp
+
+
+    # print(ff_name, cam_code, meteor_No, fps)
+    # print(X_data, Y_data)
+    # print(RA_data, dec_data)
+    # print('------------------------------------------')
+
+    # Construct the meteor measurements array
+    meteor_picks = np.c_[frames, X_data, Y_data, RA_data, dec_data, az_data, alt_data, level_data, \
+        magnitudes]
+
+
+    return meteor_picks
+
+
+
+
+
+
 def applyAstrometryFTPdetectinfo(dir_path, ftp_detectinfo_file, platepar_file, UT_corr=0, platepar=None):
     """ Use the given platepar to calculate the celestial coordinates of detected meteors from a FTPdetectinfo
         file and save the updates values.
@@ -952,59 +1041,8 @@ def applyAstrometryFTPdetectinfo(dir_path, ftp_detectinfo_file, platepar_file, U
 
         ff_name, cam_code, meteor_No, n_segments, fps, hnr, mle, binn, px_fm, rho, phi, meteor_meas = meteor
 
-        meteor_meas = np.array(meteor_meas)
-
-        # Remove all entries where levels are equal to or smaller than 0
-        level_data = meteor_meas[:, 8]
-        meteor_meas = meteor_meas[level_data > 0, :]
-
-        # Extract frame number, x, y, intensity
-        frames = meteor_meas[:, 1]
-        X_data = meteor_meas[:, 2]
-        Y_data = meteor_meas[:, 3]
-        level_data = meteor_meas[:, 8]
-
-        # Get the beginning time of the FF file
-        time_beg = filenameToDatetime(ff_name)
-
-        # Calculate time data of every point
-        time_data = []
-        for frame_n in frames:
-            t = time_beg + datetime.timedelta(seconds=frame_n/fps)
-            time_data.append([t.year, t.month, t.day, t.hour, t.minute, t.second, int(t.microsecond/1000)])
-
-
-
-        # Convert image cooredinates to RA and Dec, and do the photometry
-        JD_data, RA_data, dec_data, magnitudes = XY2CorrectedRADecPP(np.array(time_data), X_data, Y_data, \
-            level_data, platepar)
-
-
-        # Compute azimuth and altitude of centroids
-        az_data = np.zeros_like(RA_data)
-        alt_data = np.zeros_like(RA_data)
-
-        for i in range(len(az_data)):
-
-            jd = JD_data[i]
-            ra_tmp = RA_data[i]
-            dec_tmp = dec_data[i]
-
-            # Alt and az are kept in the J2000 epoch, which is the CAMS standard!
-            az_tmp, alt_tmp = raDec2AltAz(jd, platepar.lon, platepar.lat, ra_tmp, dec_tmp)
-
-            az_data[i] = az_tmp
-            alt_data[i] = alt_tmp
-
-
-        # print(ff_name, cam_code, meteor_No, fps)
-        # print(X_data, Y_data)
-        # print(RA_data, dec_data)
-        # print('------------------------------------------')
-
-        # Construct the meteor measurements array
-        meteor_picks = np.c_[frames, X_data, Y_data, RA_data, dec_data, az_data, alt_data, level_data, \
-            magnitudes]
+        # Apply the platepar to the given centroids
+        meteor_picks = applyPlateparToCentroids(ff_name, fps, meteor_meas, platepar)
 
         # Add the calculated values to the final list
         meteor_list.append([ff_name, meteor_No, rho, phi, meteor_picks])
@@ -1028,24 +1066,33 @@ def applyAstrometryFTPdetectinfo(dir_path, ftp_detectinfo_file, platepar_file, U
 
 if __name__ == "__main__":
 
-    # Read the path to the FTPdetectinfo file
-    if not len(sys.argv) == 2:
-        print("Usage: python -m RMS.Astrometry.ApplyAstrometry /path/to/FTPdetectinfo.txt")
-        sys.exit()
 
+    ### COMMAND LINE ARGUMENTS
+
+    # Init the command line arguments parser
+    arg_parser = argparse.ArgumentParser(description="Apply the platepar to the given FTPdetectinfo file.")
+
+    arg_parser.add_argument('ftpdetectinfo_path', nargs=1, metavar='FTPDETECTINFO_PATH', type=str, \
+        help='Path to the FF file.')
+
+    # Parse the command line arguments
+    cml_args = arg_parser.parse_args()
+
+    #########################
+
+    ftpdetectinfo_path = cml_args.ftpdetectinfo_path[0]
 
     # Extract the directory path
-    dir_path, ftp_detectinfo_file = os.path.split(os.path.abspath(sys.argv[1]))
+    dir_path, ftp_detectinfo_file = os.path.split(os.path.abspath(ftpdetectinfo_path))
 
-    if not '.txt' in ftp_detectinfo_file:
-        print("Usage: python -m RMS.Astrometry.ApplyAstrometry /path/to/FTPdetectinfo.txt")
-        print("Please provide the FTPdetectinfo file!")
+    if not ftp_detectinfo_file.endswith('.txt'):
+        print("Please provide a FTPdetectinfo file! It has to end with .txt")
         sys.exit()
 
     # Find the platepar file
     platepar_file = None
     for file_name in os.listdir(dir_path):
-        if 'platepar' in file_name:
+        if 'platepar_' in file_name:
             platepar_file = file_name
             break
 
@@ -1056,6 +1103,11 @@ if __name__ == "__main__":
 
     # Apply the astrometry to the given FTPdetectinfo file
     applyAstrometryFTPdetectinfo(dir_path, ftp_detectinfo_file, platepar_file)
+
+
+    # Recompute the UFOOrbit file
+    Utils.RMS2UFO.FTPdetectinfo2UFOOrbitInput(dir_path, ftp_detectinfo_file, os.path.join(dir_path, \
+        platepar_file))
 
     print('Done!')
 
