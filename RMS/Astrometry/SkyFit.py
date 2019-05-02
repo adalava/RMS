@@ -50,7 +50,7 @@ import PIL.Image, PIL.ImageDraw
 import scipy.optimize
 import scipy.ndimage
 
-from RMS.Astrometry.ApplyAstrometry import altAz2RADec, XY2CorrectedRADecPP, raDec2AltAz, raDecToCorrectedXY,\
+from RMS.Astrometry.ApplyAstrometry import altAzToRADec, xyToRaDecPP, raDec2AltAz, raDecToXY,\
     rotationWrtHorizon, rotationWrtHorizonToPosAngle, computeFOVSize, photomLine, photometryFit, \
     rotationWrtStandard, rotationWrtStandardToPosAngle
 from RMS.Astrometry.AstrometryNetNova import novaAstrometryNetSolve
@@ -600,7 +600,7 @@ class PlateTool(object):
 
 
             # Crop the image
-            img_crop = np.zeros((2*window_radius, 2*window_radius))
+            img_crop = np.zeros((2*window_radius, 2*window_radius), dtype=self.img_data_processed.dtype)
             dx_min = x_min - x_min_orig
             dx_max = x_max - x_max_orig + 2*window_radius
             dy_min = y_min - y_min_orig
@@ -673,8 +673,8 @@ class PlateTool(object):
                 # Check if the picked star is in the window, and plot it if it is
                 if (x >= x_min_orig) and (x <= x_max_orig) and (y >= y_min_orig) and (y <= y_max_orig):
 
-                    xp = zoom_factor*(x - x_min_orig)
-                    yp = zoom_factor*(y - y_min_orig)
+                    xp = zoom_factor*(x - x_min_orig) + 1
+                    yp = zoom_factor*(y - y_min_orig) + 1
 
                     if marker == '+':
                         
@@ -726,7 +726,6 @@ class PlateTool(object):
 
             # Convert the PIL image object back to array
             img_crop = np.array(img)
-
 
             # Plot the zoomed image
             plt.gcf().figimage(img_crop, xo=xo, yo=yo, zorder=5, cmap='gray', \
@@ -935,7 +934,7 @@ class PlateTool(object):
         time_data = [jd2Date(self.platepar.JD, dt_obj=True)]
 
         # Convert the reference alt/az to reference RA/Dec
-        _, ra_data, dec_data = altAz2RADec(self.platepar.lat, self.platepar.lon, self.platepar.UT_corr, 
+        _, ra_data, dec_data = altAzToRADec(self.platepar.lat, self.platepar.lon, self.platepar.UT_corr, 
             time_data, [self.platepar.az_centre], [self.platepar.alt_centre], dt_time=True)
 
         # Assign the computed RA/Dec to platepar
@@ -1596,12 +1595,13 @@ class PlateTool(object):
 
 
             # Adjust levels (auto)
-            img_data = Image.adjustLevels(img_data, min_lvl, self.img_gamma, max_lvl)
+            img_data = Image.adjustLevels(img_data, min_lvl, self.img_gamma, max_lvl, scaleto8bits=True)
 
         else:
             
             # Adjust levels (manual)
-            img_data = Image.adjustLevels(img_data, self.img_level_min, self.img_gamma, self.img_level_max)
+            img_data = Image.adjustLevels(img_data, self.img_level_min, self.img_gamma, self.img_level_max,
+                scaleto8bits=True)
 
 
 
@@ -1615,7 +1615,8 @@ class PlateTool(object):
 
         # Show the loaded image (defining the exent speeds up image drawimg)
         plt.imshow(img_data, cmap='gray', interpolation='nearest', \
-            extent=(0, self.img_data_processed.shape[1], self.img_data_processed.shape[0], 0))
+            extent=(0, self.img_data_processed.shape[1], self.img_data_processed.shape[0], 0),
+            vmin=0, vmax=255)
 
         # Draw stars that were paired in picking mode
         self.drawPairedStars()
@@ -1823,7 +1824,7 @@ class PlateTool(object):
         img_time = self.img_handle.currentTime()
 
         # Convert the FOV centre to RA/Dec
-        _, ra_centre, dec_centre, _ = XY2CorrectedRADecPP([img_time], [self.platepar.X_res/2], 
+        _, ra_centre, dec_centre, _ = xyToRaDecPP([img_time], [self.platepar.X_res/2], 
             [self.platepar.Y_res/2], [1], self.platepar)
         
         ra_centre = ra_centre[0]
@@ -1884,7 +1885,7 @@ class PlateTool(object):
         jd = date2JD(*img_time)
 
         # Convert star RA, Dec to image coordinates
-        x_array, y_array = raDecToCorrectedXY(ra_catalog, dec_catalog, jd, lat, lon, self.platepar.X_res, \
+        x_array, y_array = raDecToXY(ra_catalog, dec_catalog, jd, lat, lon, self.platepar.X_res, \
             self.platepar.Y_res, ra_ref, dec_ref, self.platepar.JD, pos_angle_ref, F_scale, x_poly_rev, \
             y_poly_rev, UT_corr=self.platepar.UT_corr)
 
@@ -1905,7 +1906,7 @@ class PlateTool(object):
 
         # Compute RA, Dec of image stars
         img_time = self.img_handle.currentTime()
-        _, ra_array, dec_array, _ = XY2CorrectedRADecPP(len(img_x)*[img_time], img_x, img_y, len(img_x)*[1], \
+        _, ra_array, dec_array, _ = xyToRaDecPP(len(img_x)*[img_time], img_x, img_y, len(img_x)*[1], \
             platepar)
 
         return ra_array, dec_array
@@ -2035,7 +2036,7 @@ class PlateTool(object):
         time_data = [img_time]
 
         # Convert FOV centre to RA, Dec
-        _, ra_data, dec_data = altAz2RADec(self.platepar.lat, self.platepar.lon, self.platepar.UT_corr, 
+        _, ra_data, dec_data = altAzToRADec(self.platepar.lat, self.platepar.lon, self.platepar.UT_corr, 
             time_data, [self.azim_centre], [self.alt_centre])
 
 
@@ -2194,7 +2195,7 @@ class PlateTool(object):
         try:
             # Load the flat, byteswap the flat if vid file is used or UWO png
             flat = Image.loadFlat(*os.path.split(flat_file), dtype=self.img_data_raw.dtype, \
-                byteswap=self.img_handle.byteswap, dark=self.dark)
+                byteswap=self.img_handle.byteswap)
         except:
             messagebox.showerror(title='Flat field file error', \
                 message='Flat could not be loaded!')
@@ -2745,7 +2746,7 @@ class PlateTool(object):
         print()
         print('Residuals')
         print('----------')
-        print(' No,   Img X,   Img Y, RA (deg), Dec (deg),    Mag, -2.5*LSP, Cat X,   Cat Y, Err amin,  Err px, Direction')
+        print(' No,   Img X,   Img Y, RA (deg), Dec (deg),    Mag, -2.5*LSP,    Cat X,   Cat Y, Err amin,  Err px, Direction')
 
         # Calculate the distance and the angle between each pair of image positions and catalog predictions
         for star_no, (cat_x, cat_y, cat_coords, img_c) in enumerate(zip(catalog_x, catalog_y, catalog_stars, \
@@ -2764,7 +2765,7 @@ class PlateTool(object):
 
             # Compute the residuals in ra/dec in angular coordiniates
             img_time = self.img_handle.currentTime()
-            _, ra_img, dec_img, _ = XY2CorrectedRADecPP([img_time], [img_x], [img_y], [1], self.platepar)
+            _, ra_img, dec_img, _ = xyToRaDecPP([img_time], [img_x], [img_y], [1], self.platepar)
 
             ra_img = ra_img[0]
             dec_img = dec_img[0]
@@ -2778,7 +2779,7 @@ class PlateTool(object):
 
 
             # Print out the residuals
-            print('{:3d}, {:7.2f}, {:7.2f}, {:>8.3f}, {:>+9.3f}, {:+6.2f}, {:7.2f}, {:8.2f}, {:7.2f}, {:8.2f}, {:7.2f}, {:+9.1f}'.format(star_no + 1, img_x, img_y, \
+            print('{:3d}, {:7.2f}, {:7.2f}, {:>8.3f}, {:>+9.3f}, {:+6.2f},  {:7.2f}, {:8.2f}, {:7.2f}, {:8.2f}, {:7.2f}, {:+9.1f}'.format(star_no + 1, img_x, img_y, \
                 ra, dec, mag, -2.5*np.log10(sum_intens), cat_x, cat_y, 60*angular_distance, distance, np.degrees(angle)))
 
 

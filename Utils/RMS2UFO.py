@@ -2,8 +2,6 @@
 
 from __future__ import print_function, division, absolute_import
 
-from __future__ import print_function, division, absolute_import
-
 import os
 import argparse
 import datetime
@@ -13,7 +11,7 @@ import numpy as np
 import RMS.Astrometry.ApplyAstrometry
 from RMS.Formats import FTPdetectinfo
 from RMS.Formats import FFfile
-from RMS.Formats import Platepar
+import RMS.Formats.Platepar
 from RMS.Formats import UFOOrbit
 from RMS import Math
 
@@ -41,7 +39,7 @@ def FTPdetectinfo2UFOOrbitInput(dir_path, file_name, platepar_path, platepar_dic
     # Load the platepar file
     if platepar_dict is None:
 
-        pp = Platepar.Platepar()
+        pp = RMS.Formats.Platepar.Platepar()
         pp.read(platepar_path)
 
 
@@ -115,9 +113,9 @@ def FTPdetectinfo2UFOOrbitInput(dir_path, file_name, platepar_path, platepar_dic
         azim2 = (90 - np.degrees(azim2))%360
 
         # Compute RA/Dec from Alt/Az
-        _, ra1, dec1 = RMS.Astrometry.ApplyAstrometry.altAz2RADec(pp.lat, pp.lon, pp.UT_corr, [dt1], \
+        _, ra1, dec1 = RMS.Astrometry.ApplyAstrometry.altAzToRADec(pp.lat, pp.lon, pp.UT_corr, [dt1], \
             [azim1], [alt1], dt_time=True)
-        _, ra2, dec2 = RMS.Astrometry.ApplyAstrometry.altAz2RADec(pp.lat, pp.lon, pp.UT_corr, [dt2], \
+        _, ra2, dec2 = RMS.Astrometry.ApplyAstrometry.altAzToRADec(pp.lat, pp.lon, pp.UT_corr, [dt2], \
             [azim2], [alt2], dt_time=True)
 
 

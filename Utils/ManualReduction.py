@@ -24,13 +24,15 @@ import matplotlib.patches as mpatches
 from matplotlib.font_manager import FontProperties
 
 import RMS.ConfigReader as cr
-from RMS.Astrometry.ApplyAstrometry import XY2CorrectedRADecPP, raDec2AltAz, applyAstrometryFTPdetectinfo
+from RMS.Astrometry.ApplyAstrometry import xyToRaDecPP, raDec2AltAz, applyAstrometryFTPdetectinfo
+from RMS.Formats.FFfile import filenameToDatetime
 from RMS.Formats.FRbin import read as readFR
 from RMS.Formats.FRbin import validFRName
 from RMS.Formats.FTPdetectinfo import writeFTPdetectinfo
 from RMS.Formats.FrameInterface import detectInputType
 from RMS.Formats.Platepar import Platepar
 from RMS.Misc import openFileDialog
+from RMS.Pickling import loadPickle, savePickle
 from RMS.Routines import Image
 
 
@@ -139,7 +141,9 @@ class ManualReductionTool(object):
 
             # Update the total frame number
             if self.img_handle is None:
-                self.nframes = len(self.fr.t[self.current_line])
+
+                # Assume the time in the FR file coresponds to the beginning of the FF file
+                self.nframes = 255
 
                 self.dir_path, _ = os.path.split(self.fr_file)
 
@@ -147,13 +151,32 @@ class ManualReductionTool(object):
             self.fr = None
 
 
+        # Take the FPS from the FF file, if available
+        if self.ff is not None:
+            if hasattr(self.ff, 'fps'):
+                self.fps = self.ff.fps
+
+        if self.fps is None:
+
+            # Try reading FPS from image handle
+            if self.img_handle is not None:
+                self.fps = self.img_handle.fps
+
+            else:
+                # Otherwise, read FPS from config
+                self.fps = self.config.fps
+
+
+        print('Using FPS:', self.fps)
+
+
         # If there is only one frame, assume it's a static image, and enable adding more picks on the same 
         #   image
-        if self.img_handle.total_frames == 1:
-            self.single_image_mode = True
+        self.single_image_mode = False
+        if self.img_handle is not None:
+            if self.img_handle.total_frames == 1:
+                self.single_image_mode = True
 
-        else:
-            self.single_image_mode = False            
 
         ###########
 
@@ -230,6 +253,14 @@ class ManualReductionTool(object):
             self.current_frame = 100
 
 
+        # Initialize matplotlib config
+        self.initImage()
+
+
+
+    def initImage(self):
+        """ Initialize matplotlib configuration. """
+
         ### INIT IMAGE ###
 
         plt.figure(facecolor='black')
@@ -240,6 +271,13 @@ class ManualReductionTool(object):
         self.printStatus()
 
         self.ax = plt.gca()
+
+        # Register keys with matplotlib
+        self.registerEventHandling()
+
+
+    def registerEventHandling(self):
+        """ Register mouse button and key pressess with matplotlib. """
 
         # Set the bacground color to black
         #matplotlib.rcParams['axes.facecolor'] = 'k'
@@ -264,6 +302,8 @@ class ManualReductionTool(object):
 
         # Set the status update formatter
         plt.gca().format_coord = self.mouseOverStatus
+
+
 
 
 
@@ -368,7 +408,7 @@ class ManualReductionTool(object):
         try:
             # Load the flat. Byteswap the flat if vid file is used
             flat = Image.loadFlat(*os.path.split(flat_file), dtype=self.current_image.dtype, \
-                byteswap=byteswap, dark=self.dark)
+                byteswap=byteswap)
             
         except:
             messagebox.showerror(title='Flat field file error', \
@@ -829,7 +869,7 @@ class ManualReductionTool(object):
             time_data = [self.img_handle.currentTime()]*len(intensities)
 
             # Compute the magntiudes
-            _, _, _, mag_data = XY2CorrectedRADecPP(time_data, x_centroids, y_centroids, intensities, self.platepar)
+            _, _, _, mag_data = xyToRaDecPP(time_data, x_centroids, y_centroids, intensities, self.platepar)
 
 
             # Plot the magnitudes
@@ -1021,6 +1061,9 @@ class ManualReductionTool(object):
 
             # Save the FTPdetectinfo file
             self.saveFTPdetectinfo()
+
+            # Save the state of the program
+            self.saveState()
 
 
         # Load the dark frame
@@ -1241,13 +1284,26 @@ class ManualReductionTool(object):
         status_str = "x={:7.2f}  y={:7.2f}  Intens={:d}".format(x, y, self.current_image_viewing[int(y), int(x)])
 
         # Add coordinate info if platepar is present
-        if (self.platepar is not None) and (self.img_handle is not None):
+        if self.platepar is not None:
 
-            # Construct time data
-            time_data = [self.img_handle.currentFrameTime()]
+            # Get the current frame time
+            if self.img_handle is None:
+
+                # If there is not image handle, assume it's an FR file
+                dt = filenameToDatetime(os.path.basename(self.fr_file)) \
+                    + datetime.timedelta(seconds=self.current_frame/float(self.fps))
+
+                time_data = [(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond/1000)]
+
+
+            # Get current frame time
+            else:
+                time_data = [self.img_handle.currentFrameTime()]
+
+
 
             # Compute RA, dec
-            jd, ra, dec, _ = XY2CorrectedRADecPP(time_data, [x], [y], [1], self.platepar)
+            jd, ra, dec, _ = xyToRaDecPP(time_data, [x], [y], [1], self.platepar)
 
             # Compute alt, az
             azim, alt = raDec2AltAz(jd[0], self.platepar.lon, self.platepar.lat, ra[0], dec[0])
@@ -1377,7 +1433,7 @@ class ManualReductionTool(object):
             # If there are no photometry pixels, set the intensity to 0
             if not pick.photometry_pixels:
                 
-                pick.intensity_sum = 0
+                pick.intensity_sum = 1
 
                 return None
 
@@ -1438,6 +1494,10 @@ class ManualReductionTool(object):
 
             # Compute the background subtracted intensity sum
             pick.intensity_sum = np.ma.sum(crop_img - background_lvl)
+
+            # Make sure the intensity sum is never 0
+            if pick.intensity_sum <= 0:
+                pick.intensity_sum = 1
 
 
     def recomputeAllIntensitySums(self):
@@ -1871,6 +1931,24 @@ class ManualReductionTool(object):
             self.printStatus()
 
 
+
+    def saveState(self):
+        """ Save the current state of the program to a file, so it can be reloaded. """
+
+        state_date_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S.%f")[:-3]
+        state_file = 'manualReduction_{:s}.state'.format(state_date_str)
+
+        # Save the state to a pickle file
+        savePickle(self, self.dir_path, state_file)
+
+        # Write the latest pickle fine
+        savePickle(self, self.dir_path, 'manualReduction_latest.state')
+
+        print('Saved state to file:', state_file)
+
+
+
+
     def saveFTPdetectinfo(self):
         """ Saves the picks to a FTPdetectinfo file in the same folder where the first given file is. """
 
@@ -1932,23 +2010,6 @@ class ManualReductionTool(object):
         # Read the station code for the file name
         station_id = ff_name_ftp.split('_')[1]
 
-        # Take the FPS from the FF file, if available
-        if self.ff is not None:
-            if hasattr(self.ff, 'fps'):
-                self.fps = self.ff.fps
-
-        if self.fps is None:
-
-            # Try reading FPS from image handle
-            if self.img_handle is not None:
-                self.fps = self.img_handle.fps
-
-            else:
-                # Otherwise, read FPS from config
-                self.fps = self.config.fps
-
-
-        print('Using FPS:', self.fps)
 
         # Write the FTPdetect info
         writeFTPdetectinfo(meteor_list, dir_path, ftpdetectinfo_name, '', station_id, self.fps)
@@ -2019,7 +2080,7 @@ if __name__ == "__main__":
         """, formatter_class=argparse.RawTextHelpFormatter)
 
     arg_parser.add_argument('file1', metavar='FILE1', type=str, nargs=1, \
-                    help='Path to an FF file, or an FR file if an FF file is not available. Or, a path to a directory with PNG files can be given.')
+                    help='Path to one of the following: an FF file, an FR file (if an FF file is not available), a directory with PNG files, or to a saved .state file.')
 
     arg_parser.add_argument('input2', metavar='INPUT2', type=str, nargs='*', \
                     help='If an FF file was given, an FR file can be given in addition. If PNGs are used, this second argument must be the UTC time of frame 0 in the following format: YYYYMMDD_HHMMSS.uuu')
@@ -2080,7 +2141,7 @@ if __name__ == "__main__":
 
 
     # Extract inputs
-    file1 = cml_args.file1[0]
+    file1 = os.path.abspath(cml_args.file1[0])
 
     if cml_args.input2:
         input2 = cml_args.input2[0]
@@ -2107,7 +2168,17 @@ if __name__ == "__main__":
     
     # If only an FR file was given
     head1, tail1 = os.path.split(file1)
-    if validFRName(tail1):
+
+    # If the state file was given, load the state
+    if tail1.endswith('.state'):
+
+        # Load the manual redicution tool object from a state file
+        manual_tool = loadPickle(head1, tail1)
+        manual_tool.updateImage()
+        manual_tool.registerEventHandling()
+
+
+    elif validFRName(tail1):
 
         print('FR only mode!')
 

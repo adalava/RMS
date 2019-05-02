@@ -22,6 +22,7 @@ from time import time
 import datetime
 import sys, os
 import ctypes
+import traceback
 
 import numpy as np
 import numpy.ctypeslib as npct
@@ -33,15 +34,16 @@ import matplotlib.gridspec as gridspec
 from mpl_toolkits.mplot3d import Axes3D
 
 # RMS imports
-from RMS.Astrometry.Conversions import datetime2UnixTime, jd2Date
-from RMS.Astrometry.ApplyAstrometry import XY2CorrectedRADecPP, raDec2AltAz
+from RMS.Astrometry.Conversions import jd2Date
+from RMS.Astrometry.ApplyAstrometry import raDec2AltAz
 import RMS.ConfigReader as cr
 from RMS.DetectionTools import getThresholdedStripe3DPoints, loadImageCalibration
 from RMS.Formats.AsgardEv import writeEv
+from RMS.Formats.AST import xyToRaDecAST
 from RMS.Formats import FFfile
 from RMS.Formats import FTPdetectinfo
 from RMS.Formats.FrameInterface import detectInputType
-from RMS.Formats.Platepar import Platepar
+from RMS.Formats.AST import loadAST
 from RMS.Misc import mkdirP
 from RMS.Routines.Grouping3D import find3DLines, getAllPoints
 from RMS.Routines.CompareLines import compareLines
@@ -580,8 +582,8 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
         """ Least squares fit.
         """
 
-        A = np.vstack([x, np.ones(len(x))]).T
-        m, c = np.linalg.lstsq(A, y, rcond=None)[0]
+        A = np.vstack([x, np.ones(len(x)).astype(np.float64)]).T
+        m, c = np.linalg.lstsq(A, y, rcond=-1)[0]
 
         return m, c
 
@@ -640,12 +642,55 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
         return filtered_chains
 
 
+    def _filterFrameGaps(centroids, frame_diff_multiplier=3.5):
+        """ Filter centroid chains with gaps in frames. All chains with a gap of more than 2 frames will be 
+            stripped at the edges. 
+        """
 
-    # Skip centroid correction if there are not conteroids, of there's only one
-    if len(centroids) < 2:
+        # Filter edge frame outliers until a stable set is achieved
+
+        prev_len = np.inf
+        while len(centroids) < prev_len:
+
+            prev_len = len(centroids)
+            frame_array = centroids[:,0]
+
+            # Compute median frame difference
+            frame_diffs = frame_array[1:] - frame_array[:-1]
+            frame_diff_med = np.median(frame_diffs)
+            
+            mask_array = np.ones_like(frame_array)
+
+            # If frame differences in the first half are larger than 2x the median frame difference, cull them
+            for i in range(len(frame_diffs)//2):
+                if frame_diffs[i] > frame_diff_multiplier*frame_diff_med:
+                    mask_array[i] = 0
+
+            # If frame differences in the last half are larger than 2x the median frame difference, cull them
+            for i in range(len(frame_diffs)//2, len(frame_diffs)):
+                if frame_diffs[i] > frame_diff_multiplier*frame_diff_med:
+                    mask_array[i + 1] = 0
+
+            # Filter centroids by mask
+            centroids = centroids[np.where(mask_array)]
+
         return centroids
 
-    centroids_array = np.array(centroids)
+
+    # Skip centroid correction if there are not enough centroids
+    if len(centroids) < 3:
+        return centroids
+
+    centroids_array = np.array(centroids).astype(np.float64)
+
+    # Filter centroids of frame gaps
+    centroids_array = _filterFrameGaps(centroids_array)
+
+    # Skip centroid correction if there are not enough centroids
+    if len(centroids) < 3:
+        return centroids
+
+        
 
     # Separate by individual columns of the centroid array
     frame_array = centroids_array[:,0]
@@ -656,8 +701,12 @@ def filterCentroids(centroids, centroid_max_deviation, max_distance):
     try:
         mX, cX = _LSQfit(x_array, frame_array)
         mY, cY = _LSQfit(y_array, frame_array)
-    except:
+    except Exception as e:
+        log.debug('Fitting centroid X and Y progressions in time failed with message:\n' + repr(e))
+        log.debug(repr(traceback.format_exception(*sys.exc_info())))
         log.debug('Filtering centroids failed at fitting X and Y progressions in time, skipping filtering...')
+        logDebug('x_array:', x_array)
+        logDebug('y_array:', y_array)
         return centroids
 
     filtered_centroids = []
@@ -1170,6 +1219,7 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
                     correct_binning=(img_handle.input_type != 'ff'))
 
                 if not ang_vel_status:
+                    logDebug(detected_line)
                     logDebug('Rejected at initial stage due to the angular velocity: {:.2f} deg/s'.format(ang_vel))
                     continue
 
@@ -1343,10 +1393,10 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
 
                     # Calculate weighted centroids
                     x_weighted = half_frame_pixels[:,0]*np.transpose(max_weights)
-                    x_centroid = np.sum(x_weighted)/float(np.sum(max_weights))
+                    x_centroid = np.sum(x_weighted.astype(np.float64))/float(np.sum(max_weights))
 
                     y_weighted = half_frame_pixels[:,1]*np.transpose(max_weights)
-                    y_centroid = np.sum(y_weighted)/float(np.sum(max_weights))
+                    y_centroid = np.sum(y_weighted.astype(np.float64))/float(np.sum(max_weights))
 
 
                     # Correct the rolling shutter effect
@@ -1411,7 +1461,7 @@ def detectMeteors(img_handle, config, flat_struct=None, dark=None, mask=None, as
                         if config.detection_binning_method == 'avg':
                             intensity *= config.detection_binning_factor**2
 
-                    logDebug("centroid: fr {:.1f}, x {:.2f}, y {:.2f}, intens {:d}".format(frame_no, \
+                    logDebug("centroid: fr {:>12.3f}, x {:>7.2f}, y {:>7.2f}, intens {:d}".format(frame_no, \
                         x_centroid, y_centroid, intensity))
 
                     # Add computed centroid to the centroid list
@@ -1522,8 +1572,11 @@ if __name__ == "__main__":
     arg_parser.add_argument('-g', '--gamma', metavar='CAMERA_GAMMA', type=float, \
         help="Camera gamma value. Science grade cameras have 1.0, consumer grade cameras have 0.45. Adjusting this is essential for good photometry, and doing star photometry through SkyFit can reveal the real camera gamma.")
 
-    arg_parser.add_argument('-a', '--asgard', nargs=1, metavar='ASGARD_PLATEPAR', type=str, \
-        help="""Write output as ASGARD event files, not CAMS FTPdetectinfo. Path to the platepar file needs to be given.""")
+    arg_parser.add_argument('-a', '--asgard', nargs=1, metavar='ASGARD_PLATE', type=str, \
+        help="""Write output as ASGARD event files, not CAMS FTPdetectinfo. The path to an AST plate is taken as the argument.""")
+
+    arg_parser.add_argument('-p', '--photoff', metavar='ASGARD_PHOTOMETRIC_OFFSET', type=float, \
+        help="""Photometric offset used when the ASGARD AST plate is given. Mandatory argument if --asgard is used.""")
 
 
     arg_parser.add_argument('-d', '--debug', action="store_true", \
@@ -1557,24 +1610,36 @@ if __name__ == "__main__":
 
 
 
-    # Check if a correct platepar file was given for ASGARD data
+    # Check if a correct AST file was given for ASGARD data and if the photometric offset is given
     if cml_args.asgard is not None:
 
         # Extract the path to the platepar file
-        platepar_path = cml_args.asgard[0]
+        ast_path = cml_args.asgard[0]
 
-        platepar = Platepar()
-        pp_status = platepar.read(platepar_path)
-
-        if not pp_status:
-            print('The platepar file could not be loaded: {:s}'.format(platepar_path))
+        # Quit if the AST file does not exist
+        if not os.path.isfile(ast_path):
+            print()
+            print('The AST file could not be loaded: {:s}'.format(ast_path))
             print('Exiting...')
+            sys.exit()
 
+        # Load the AST plate
+        ast = loadAST(*os.path.split(ast_path))
+
+        
+
+        # Check if the photometric offset is given
+        photom_offset = cml_args.photoff
+
+        if photom_offset is None:
+            print()
+            print('The photometric offset has to be given with argument --photoff if the AST plate is given with the --asgard argument.')
+            print('Exiting...')
             sys.exit()
 
 
 
-    # Measure the time of the whole operation
+    # Measure time taken for the detection
     time_whole = time()
 
 
@@ -1647,7 +1712,7 @@ if __name__ == "__main__":
 
 
         # Set the main directory to the the given input directory
-        main_dir = dir_path_input
+        main_dir = img_handle_main.dir_path
 
 
 
@@ -1692,7 +1757,7 @@ if __name__ == "__main__":
 
         # Run the meteor detection algorithm
         meteor_detections = detectMeteors(img_handle, config, flat_struct=flat_struct, dark=dark, mask=mask, \
-            debug=cml_args.debugplots, asgard=cml_args.asgard)
+            debug=cml_args.debugplots, asgard=(cml_args.asgard is not None))
 
         # Supress numpy scientific notation printing
         np.set_printoptions(suppress=True)
@@ -1756,15 +1821,15 @@ if __name__ == "__main__":
                 ### Compute alt/az and magnitudes
                 
                 # Compute ra/dec
-                jd_array, ra_array, dec_array, mag_array = XY2CorrectedRADecPP(time_array, x_array, y_array, \
-                    intensity_array, platepar)
+                jd_array, ra_array, dec_array, mag_array = xyToRaDecAST(time_array, x_array, y_array, \
+                    intensity_array, ast, photom_offset)
 
                 # Compute alt/az
                 azim_array = []
                 alt_array = []
                 for jd, ra, dec in zip(jd_array, ra_array, dec_array):
 
-                    azim, alt = raDec2AltAz(jd, platepar.lon, platepar.lat, ra, dec)
+                    azim, alt = raDec2AltAz(jd, np.degrees(ast.lon), np.degrees(ast.lat), ra, dec)
 
                     azim_array.append(azim)
                     alt_array.append(alt)
@@ -1802,7 +1867,7 @@ if __name__ == "__main__":
 
 
                 # Write the ev file
-                writeEv(results_path, file_name, ev_array, platepar)
+                writeEv(results_path, file_name, ev_array, ast, ast_input=True)
 
 
     if cml_args.debug:
