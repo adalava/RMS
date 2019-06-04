@@ -12,7 +12,7 @@ VERSION=3.4.1
 
 # Installation
 sudo apt-get update
-sudo apt-get upgrade
+sudo apt-get upgrade -y
 sudo apt-get install -y build-essential cmake pkg-config
 sudo apt-get install -y libjpeg-dev libtiff5-dev libjasper-dev libpng12-dev
 sudo apt-get install -y libavcodec-dev libavformat-dev libswscale-dev libv4l-dev
@@ -24,9 +24,9 @@ sudo apt-get install -y libatlas-base-dev gfortran
 
 cd ${HOME_DIR}
 wget -O opencv.zip https://github.com/Itseez/opencv/archive/${VERSION}.zip
-unzip opencv.zip
+unzip -o opencv.zip
 wget -O opencv_contrib.zip https://github.com/Itseez/opencv_contrib/archive/${VERSION}.zip
-unzip opencv_contrib.zip
+unzip -o opencv_contrib.zip
 
 cd ${HOME_DIR}/opencv-${VERSION}/
 mkdir build

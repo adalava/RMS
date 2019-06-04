@@ -213,6 +213,9 @@ class Config:
         self.external_script_run = False
         self.external_script_path = None
         self.external_function_name = "rmsExternal"
+
+        self.reboot_after_processing = False
+        self.reboot_lock_file = ".reboot_lock"
         
         ##### Capture
         self.deviceID = 0
@@ -414,6 +417,20 @@ class Config:
         self.stack_mask = False
 
 
+        #### Shower association
+
+        # Path to the shower file
+        self.shower_path = 'share'
+        self.shower_file_name = 'established_showers.csv'
+
+        # How many degrees in solar longitude to check from the shower peak for showers that don't have
+        # a specified beginning and end
+        self.shower_lasun_threshold = 2.0
+
+        # Maximum distance from shower radiant (degrees)
+        self.shower_max_radiant_separation = 7.5
+
+
 def normalizeParameter(param, config, binning=1):
     """ Normalize detection parameters for fireball detection to be size independent.
     
@@ -518,6 +535,13 @@ def parseSystem(config, parser):
 
     if parser.has_option(section, "external_function_name"):
         config.external_function_name = parser.get(section, "external_function_name")
+
+
+    if parser.has_option(section, "reboot_after_processing"):
+        config.reboot_after_processing = parser.getboolean(section, "reboot_after_processing")
+
+    if parser.has_option(section, "reboot_lock_file"):
+        config.reboot_lock_file = parser.get(section, "reboot_lock_file")
         
 
 
