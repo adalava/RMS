@@ -18,7 +18,7 @@ import scipy.optimize
 
 from RMS.Astrometry import CheckFit
 from RMS.Astrometry.ApplyAstrometry import applyAstrometryFTPdetectinfo, applyPlateparToCentroids, \
-    altAzToRADec
+    raDec2AltAz, rotationWrtHorizon
 from RMS.Astrometry.Conversions import date2JD
 from RMS.Astrometry.FFTalign import alignPlatepar
 import RMS.ConfigReader as cr
@@ -32,7 +32,8 @@ import Utils.RMS2UFO
 
 
 
-def recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars):
+def recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars, max_match_radius=None,
+        force_platepar_save=False):
     """ Given the platepar and a list of stars on one image, try to recalibrate the platepar to achieve
         the best match by brute force star matching.
 
@@ -44,8 +45,14 @@ def recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars):
             list of star coordinates.
         catalog_stars: [ndarray] A numpy array of catalog stars which should be on the image.
 
+    Keyword argumnets:
+        max_radius: [float] Maximum radius used for star matching. None by default, which uses all hardcoded
+            values.
+        force_platepar_save: [bool] Skip the goodness of fit check and save the platepar.
+
     Return:
         result: [?] A Platepar instance if refinement is successful, None if it failed.
+        min_match_radius: [float] Minimum radius that successfuly matched the stars (pixels).
     """
 
     working_platepar = copy.deepcopy(working_platepar)
@@ -86,7 +93,16 @@ def recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars):
     ##########
 
     # Go through all radiia and match the stars
+    min_match_radius = None
     for match_radius in radius_list:
+
+        # Skip radiuses that are too small if the radius filter is on
+        if max_match_radius is not None:
+            if match_radius < max_match_radius:
+                print("Stopping radius decrements because {:.2f} < {:.2f}".format(match_radius, \
+                    max_match_radius))
+                break
+
 
         # If the platepar is good, don't recalibrate anymore
         if CheckFit.checkFitGoodness(config, working_platepar, catalog_stars, star_dict_ff, match_radius, \
@@ -140,7 +156,7 @@ def recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars):
         # If the fit was not successful, stop further fitting on this FF file
         if (not res.success) or (n_matched < config.min_matched_stars):
 
-            if not res.successful:
+            if not res.success:
                 print('Astrometry fit failed!')
 
             else:
@@ -155,11 +171,23 @@ def recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars):
             # If the fit was successful, use the new parameters from now on
             working_platepar = temp_platepar
 
+            # Keep track of the minimum match radius
+            min_match_radius = match_radius
+
             print('Astrometry fit successful!')
 
 
+    # Choose which radius will be chosen for the goodness of fit check
+    if max_match_radius is None:
+        goodnes_check_radius = match_radius
+
+    else:
+        goodnes_check_radius = max_match_radius
+
+
     # If the platepar is good, store it
-    if CheckFit.checkFitGoodness(config, working_platepar, catalog_stars, star_dict_ff, match_radius):
+    if CheckFit.checkFitGoodness(config, working_platepar, catalog_stars, star_dict_ff, \
+        goodnes_check_radius) or force_platepar_save:
 
         print('Saving improved platepar...')
 
@@ -175,16 +203,17 @@ def recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars):
 
     # Otherwise, indicate that the refinement was not successful
     else:
-        print('No using the refined platepar...')
+        print('Not using the refined platepar...')
         result = None
 
 
-    return result
+    return result, min_match_radius
 
 
 
 
-def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, calstars_list, config, platepar):
+def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, calstars_list, config, platepar,
+    generate_plot=True):
     """ Recalibrate FF files with detections and apply the recalibrated platepar to those detections. 
 
     Arguments:
@@ -194,10 +223,20 @@ def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, cal
         config: [Config instance]
         platepar: [Platepar instance] Initial platepar.
 
+    Keyword arguments:
+        generate_plot: [bool] Generate the calibration variation plot. True by default.
+
     Return:
         recalibrated_platepars: [dict] A dictionary where the keys are FF file names and values are 
             recalibrated platepar instances for every FF file.
     """
+
+    # If the given file does not exits, return nothing
+    if not os.path.isfile(ftpdetectinfo_path):
+        print('ERROR! The FTPdetectinfo file does not exist: {:s}'.format(ftpdetectinfo_path))
+        print('    The recalibration on every file was not done!')
+
+        return {}
 
 
     # Read the FTPdetectinfo data
@@ -209,10 +248,22 @@ def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, cal
 
 
     # Load catalog stars (overwrite the mag band ratios if specific catalog is used)
-    catalog_stars, _, config.star_catalog_band_ratios = StarCatalog.readStarCatalog(config.star_catalog_path,\
+    star_catalog_status = StarCatalog.readStarCatalog(config.star_catalog_path,\
         config.star_catalog_file, lim_mag=config.catalog_mag_limit, \
         mag_band_ratios=config.star_catalog_band_ratios)
 
+    if not star_catalog_status:
+        print("Could not load the star catalog!")
+        print(os.path.join(config.star_catalog_path, config.star_catalog_file))
+        return {}
+
+    catalog_stars, _, config.star_catalog_band_ratios = star_catalog_status
+
+
+    # Update the platepar coordinates from the config file
+    platepar.lat = config.latitude
+    platepar.lon = config.longitude
+    platepar.elev = config.elevation
 
 
     prev_platepar = copy.deepcopy(platepar)
@@ -245,7 +296,7 @@ def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, cal
         star_dict_ff = {jd: calstars[ff_name]}
 
         # Recalibrate the platepar using star matching
-        result = recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars)
+        result, min_match_radius = recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars)
 
         
         # If the recalibration failed, try using FFT alignment
@@ -258,13 +309,27 @@ def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, cal
             calstars_coords = np.array(star_dict_ff[jd])[:, :2]
             calstars_coords[:, [0, 1]] = calstars_coords[:, [1, 0]]
             print(calstars_time)
-            working_platepar = alignPlatepar(config, prev_platepar, calstars_time, calstars_coords, \
+            test_platepar = alignPlatepar(config, prev_platepar, calstars_time, calstars_coords, \
                 show_plot=False)
 
             # Try to recalibrate after FFT alignment
-            result = recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars)
+            result, _ = recalibrateFF(config, test_platepar, jd, star_dict_ff, catalog_stars)
 
-            if result is not None:
+
+            # If the FFT alignment failed, align the original platepar using the smallest radius that matched
+            #   and force save the the platepar
+            if (result is None) and (min_match_radius is not None):
+                print()
+                print("Using the old platepar with the minimum match radius of: {:.2f}".format(min_match_radius))
+                result, _ = recalibrateFF(config, working_platepar, jd, star_dict_ff, catalog_stars, 
+                    max_match_radius=min_match_radius, force_platepar_save=True)
+
+                if result is not None:
+                    working_platepar = result
+
+
+            # If the alignment succeeded, save the result
+            else:
                 working_platepar = result
 
 
@@ -274,6 +339,14 @@ def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, cal
 
         # Store the platepar if the fit succeeded
         if result is not None:
+
+            # Recompute alt/az of the FOV centre
+            working_platepar.az_centre, working_platepar.alt_centre = raDec2AltAz(working_platepar.JD, \
+                working_platepar.lon, working_platepar.lat, working_platepar.RA_d, working_platepar.dec_d)
+
+            # Recompute the rotation wrt horizon
+            working_platepar.rotation_from_horiz = rotationWrtHorizon(working_platepar)
+
             recalibrated_platepars[ff_name] = working_platepar
             prev_platepar = working_platepar
 
@@ -346,33 +419,35 @@ def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, cal
         hour_list.append((FFfile.filenameToDatetime(ff_name) - first_jd).total_seconds()/3600)
 
 
-    plt.figure()
+    if generate_plot:
+        
+        plt.figure()
 
-    plt.scatter(0, 0, marker='o', edgecolor='k', label='Reference platepar', s=100, c='none', zorder=3)
+        plt.scatter(0, 0, marker='o', edgecolor='k', label='Reference platepar', s=100, c='none', zorder=3)
 
-    plt.scatter(ang_dists, rot_angles, c=hour_list, zorder=3)
-    plt.colorbar(label='Hours from first FF file')
-    
-    plt.xlabel("Angular distance from reference (arcmin)")
-    plt.ylabel('Rotation from reference (arcmin)')
+        plt.scatter(ang_dists, rot_angles, c=hour_list, zorder=3)
+        plt.colorbar(label='Hours from first FF file')
+        
+        plt.xlabel("Angular distance from reference (arcmin)")
+        plt.ylabel('Rotation from reference (arcmin)')
 
-    plt.grid()
-    plt.legend()
+        plt.grid()
+        plt.legend()
 
-    plt.tight_layout()
+        plt.tight_layout()
 
-    # Generate the name for the plot
-    calib_plot_name = os.path.basename(ftpdetectinfo_path).replace('FTPdetectinfo_', '').replace('.txt', '') \
-        + '_calibration_variation.png'
+        # Generate the name for the plot
+        calib_plot_name = os.path.basename(ftpdetectinfo_path).replace('FTPdetectinfo_', '').replace('.txt', '') \
+            + '_calibration_variation.png'
 
-    plt.savefig(os.path.join(dir_path, calib_plot_name), dpi=150)
+        plt.savefig(os.path.join(dir_path, calib_plot_name), dpi=150)
 
-    # plt.show()
+        # plt.show()
 
-    plt.clf()
-    plt.close()
+        plt.clf()
+        plt.close()
 
-    ### ###
+        ### ###
 
 
 
@@ -408,8 +483,11 @@ def recalibrateIndividualFFsAndApplyAstrometry(dir_path, ftpdetectinfo_path, cal
 
 
     # Back up the old FTPdetectinfo file
-    shutil.copy(ftpdetectinfo_path, ftpdetectinfo_path.strip('.txt') \
-        + '_backup_{:s}.txt'.format(datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f')))
+    try:
+        shutil.copy(ftpdetectinfo_path, ftpdetectinfo_path.strip('.txt') \
+            + '_backup_{:s}.txt'.format(datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f')))
+    except:
+        print('ERROR! The FTPdetectinfo file could not be backed up: {:s}'.format(ftpdetectinfo_path))
 
     # Save the updated FTPdetectinfo
     FTPdetectinfo.writeFTPdetectinfo(meteor_output_list, dir_path, os.path.basename(ftpdetectinfo_path), \

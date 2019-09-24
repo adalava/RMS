@@ -20,13 +20,16 @@ import os
 import sys
 import math
 
+import RMS
+
 try:
     # Python 3
-    from ConfigParser import RawConfigParser, NoOptionError
+    from configparser import RawConfigParser, NoOptionError 
 
 except:
-    # Python 3
-    from configparser import RawConfigParser, NoOptionError 
+    # Python 2
+    from ConfigParser import RawConfigParser, NoOptionError
+    
 
 
 
@@ -203,6 +206,9 @@ def loadConfigFromDirectory(cml_args_config, dir_path):
 class Config:
     def __init__(self):
 
+        # Get the package root directory
+        self.rms_root_dir = os.path.join(os.path.dirname(RMS.__file__), os.pardir)
+
         ##### System
         self.stationID = "XX0001"
         self.latitude = 0
@@ -251,6 +257,11 @@ class Config:
         self.log_dir = "logs"
         self.captured_dir = "CapturedFiles"
         self.archived_dir = "ArchivedFiles"
+
+        # Extra space to leave on disk for the archive (in GB) after the captured files have been taken
+        #   into account
+        self.extra_space_gb = 3
+
 
         # Enable/disable showing maxpixel on the screen
         self.live_view_enable = True
@@ -383,7 +394,7 @@ class Config:
         self.use_dark = False
         self.dark_file = 'dark.bmp'
 
-        self.star_catalog_path = 'Catalogs'
+        self.star_catalog_path = os.path.join(self.rms_root_dir, 'Catalogs')
         self.star_catalog_file = 'gaia_dr2_mag_11.5.npy'
 
         # BVRI band ratios for GAIA G band and Sony CMOS cameras
@@ -467,11 +478,11 @@ def normalizeParameterMeteor(param, config, binning=1):
     return param*width_factor*height_factor
 
 
-def parse(filename):
+def parse(filename, strict=True):
 
     try:
         # Python 3
-        parser = RawConfigParser(inline_comment_prefixes=(";"))
+        parser = RawConfigParser(inline_comment_prefixes=(";"), strict=strict)
 
     except:
         # Python 2
@@ -681,6 +692,10 @@ def parseCapture(config, parser):
 
     if parser.has_option(section, "mask"):
         config.mask_file = parser.get(section, "mask")
+
+
+    if parser.has_option(section, "extra_space_gb"):
+        config.extra_space_gb = parser.getfloat(section, "extra_space_gb")
 
 
     # Enable/disable showing maxpixel on the screen
@@ -1050,6 +1065,7 @@ def parseCalibration(config, parser):
 
     if parser.has_option(section, "star_catalog_path"):
         config.star_catalog_path = parser.get(section, "star_catalog_path")
+        config.star_catalog_path = os.path.join(config.rms_root_dir, config.star_catalog_path)
 
     if parser.has_option(section, "star_catalog_file"):
         config.star_catalog_file = parser.get(section, "star_catalog_file")

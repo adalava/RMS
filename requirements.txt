@@ -10,3 +10,5 @@ astropy==2.0.3
 mem_top
 imreg_dft
 onvif_zeep
+configparser
+imageio
