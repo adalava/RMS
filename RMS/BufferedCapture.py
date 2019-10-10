@@ -122,7 +122,6 @@ class BufferedCapture(Process):
             if "rtsp" in str(self.config.deviceID):
                 ip_cam = True
 
-
             if ip_cam:
 
                 ### If the IP camera is used, check first if it can be pinged
@@ -150,9 +149,11 @@ class BufferedCapture(Process):
 
                     if not ping_success:
                         log.error("Can't ping the camera IP!")
+                        device.release()
                         return None
 
                 else:
+                    device.release()
                     return None
 
 
@@ -174,9 +175,27 @@ class BufferedCapture(Process):
             except:
                 pass
 
+        # Wait until the device is opened
+        for i in range(20):
+            time.sleep(1)
+            if device.isOpened():
+                return device
 
-        return device
+        device.release()
+        return None
 
+
+        
+
+    def getFrame(self, device):
+        if device.grab() is False:
+            log.error('Couldn''t grab a frame from video device')
+            return False, None
+
+        ret, frame = device.retrieve()
+        if ret is False:
+            log.error('Couldn''t retrieve a frame from video device')
+        return ret,frame
 
     def run(self):
         """ Capture frames.
@@ -187,44 +206,27 @@ class BufferedCapture(Process):
 
 
         if device is None:
-
+            # TODO: try to reboot IP camera and try again?
             log.info('The video source could not be opened!')
             self.exit.set()
             return False
 
-
-        # Wait until the device is opened
-        device_opened = False
-        for i in range(20):
-            time.sleep(1)
-            if device.isOpened():
-                device_opened = True
-                break
-
-
-        # If the device could not be opened, stop capturing
-        if not device_opened:
-            log.info('The video source could not be opened!')
-            self.exit.set()
-            return False
-
-        else:
-            log.info('Video device opened!')
-
-
-
-        # Throw away first 10 frame
-        for i in range(10):
-            device.read()
-
-
-        first = True
+        log.info('Video device opened!')
 
         wait_for_reconnect = False
+
+        # Throw away first 10 frames
+        for i in range(10):
+            ret, frame = self.getFrame(device)
+            if ret is False:
+                wait_for_reconnect = True
+                log.error('Error reading camera frame during initialization.')
+                break
+
+        first = True
         
         # Run until stopped from the outside
         while not self.exit.is_set():
-
 
             lastTime = 0
             
@@ -246,8 +248,10 @@ class BufferedCapture(Process):
                     time.sleep(5)
 
                     # Reinit the video device
-                    device = self.initVideoDevice()
+                    if device is not None:
+                        device.release()
 
+                    device = self.initVideoDevice()
 
                     if device is None:
                         print("The video device couldn't be connected! Retrying...")
@@ -259,7 +263,10 @@ class BufferedCapture(Process):
 
                     # Read the frame
                     log.info("Reading frame...")
-                    ret, frame = device.read()
+                    #ret, frame = device.read()
+                    ret, frame = self.getFrame(device)
+                    if ret is False:
+                        log.error('Error reading camera frame [2] (TODO: reconnect?)')
                     log.info("Frame read!")
 
                     # If the connection was made and the frame was retrieved, continue with the capture
@@ -281,14 +288,14 @@ class BufferedCapture(Process):
 
                 # Read the frame
                 t1_frame = time.time()
-                ret, frame = device.read()
+                ret, frame = self.getFrame(device)
                 t_frame = time.time() - t1_frame
 
 
                 # If the video device was disconnected, wait for reconnection
-                if not ret:
+                if ret is False:
 
-                    log.info('Frame grabbing failed, video device is probably disconnected!')
+                    log.error('Frame grabbing failed, video device is probably disconnected!')
 
                     wait_for_reconnect = True
                     break
@@ -399,6 +406,7 @@ class BufferedCapture(Process):
         
 
         log.info('Releasing video device...')
-        device.release()
+        if device is not None:
+            device.release()
         log.info('Video device released!')
     
