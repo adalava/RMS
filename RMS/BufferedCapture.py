@@ -175,7 +175,29 @@ class BufferedCapture(Process):
                 pass
 
 
-        return device
+        # Wait until the device is opened
+        for i in range(20):
+            time.sleep(1)
+            if device.isOpened():
+                return device
+
+        if device is not None:
+            device.release()
+        return None
+
+
+    def getFrame(self, device):
+        if device.grab() is False:
+            log.error("Couldn't grab a frame from video device")
+            return False, None
+
+        ret, frame = device.retrieve()
+        if ret is False:
+            log.error("Couldn't retrieve a frame from video device")
+        elif (frame is None) or (frame.size == 0):
+            log.error('Empty frame received')
+
+        return ret,frame
 
 
     def run(self):
@@ -187,41 +209,24 @@ class BufferedCapture(Process):
 
 
         if device is None:
-
             log.info('The video source could not be opened!')
             self.exit.set()
             return False
 
+        log.info('Video device opened!')
 
-        # Wait until the device is opened
-        device_opened = False
-        for i in range(20):
-            time.sleep(1)
-            if device.isOpened():
-                device_opened = True
-                break
+        wait_for_reconnect = False
 
-
-        # If the device could not be opened, stop capturing
-        if not device_opened:
-            log.info('The video source could not be opened!')
-            self.exit.set()
-            return False
-
-        else:
-            log.info('Video device opened!')
-
-
-
-        # Throw away first 10 frame
+        # Throw away first 10 frames
         for i in range(10):
-            device.read()
-
+            ret, frame = self.getFrame(device)
+            if ret is False:
+                wait_for_reconnect = True
+                log.error('Error reading camera frame during initialization.')
+                break
 
         first = True
 
-        wait_for_reconnect = False
-        
         # Run until stopped from the outside
         while not self.exit.is_set():
 
@@ -246,8 +251,10 @@ class BufferedCapture(Process):
                     time.sleep(5)
 
                     # Reinit the video device
-                    device = self.initVideoDevice()
+                    if device is not None:
+                        device.release()
 
+                    device = self.initVideoDevice()
 
                     if device is None:
                         print("The video device couldn't be connected! Retrying...")
@@ -259,7 +266,10 @@ class BufferedCapture(Process):
 
                     # Read the frame
                     log.info("Reading frame...")
-                    ret, frame = device.read()
+                    ret, frame = self.getFrame(device)
+                    if ret is False:
+                        log.error('Error reading camera frame (TODO: reconnect?)')
+
                     log.info("Frame read!")
 
                     # If the connection was made and the frame was retrieved, continue with the capture
@@ -286,9 +296,9 @@ class BufferedCapture(Process):
 
 
                 # If the video device was disconnected, wait for reconnection
-                if not ret:
+                if ret is False:
 
-                    log.info('Frame grabbing failed, video device is probably disconnected!')
+                    log.error('Frame grabbing failed, video device is probably disconnected!')
 
                     wait_for_reconnect = True
                     break
@@ -399,6 +409,7 @@ class BufferedCapture(Process):
         
 
         log.info('Releasing video device...')
-        device.release()
+        if device is not None:
+            device.release()
         log.info('Video device released!')
     
