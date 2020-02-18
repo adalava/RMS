@@ -291,7 +291,7 @@ class BufferedCapture(Process):
 
                 # Read the frame
                 t1_frame = time.time()
-                ret, frame = device.read()
+                ret, frame = self.getFrame(device)
                 t_frame = time.time() - t1_frame
 
 
