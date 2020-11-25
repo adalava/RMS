@@ -13,6 +13,8 @@ import shutil
 import datetime
 import cv2
 
+from errno import ETIME
+
 from PIL import ImageFont
 
 from RMS.Formats.FFfile import read as readFF
@@ -21,7 +23,19 @@ from RMS.Misc import mkdirP
 
 fps=10
 
-def generateTimelapse(dir_path, nodel) :   
+def time_expired(start_time, allowed_seconds):
+
+    if allowed_seconds is None:
+        return false
+
+    elapsed_seconds = (datetime.datetime.utcnow() - start_time).total_seconds()
+    if elapsed_seconds > allowed_seconds:
+        return true
+
+    return false
+
+
+def generateTimelapse(dir_path, nodel, timeout = None) :   
 
     t1 = datetime.datetime.utcnow()
 
@@ -47,6 +61,9 @@ def generateTimelapse(dir_path, nodel) :
     ff_list = [ff_name for ff_name in sorted(os.listdir(dir_path)) if validFFName(ff_name)]
 
     for file_name in ff_list:
+
+        if time_expired(t1, timeout):
+            return ETIME
 
         # Read the FF file
         ff = readFF(dir_path, file_name)
@@ -92,6 +109,13 @@ def generateTimelapse(dir_path, nodel) :
             sys.stdout.flush()
 
 
+    # calculate seconds remaining for running avconv/ffmpeg
+    if timeout is not None:
+        remaining_seconds = timeout - (datetime.datetime.utcnow() - t1).total_seconds()
+    else:
+        remaining_seconds = None
+
+
     # If running on Linux, use avconv
     if platform.system() == 'Linux':
 
@@ -100,12 +124,19 @@ def generateTimelapse(dir_path, nodel) :
         print("Checking if avconv is available...")
         if os.system(software_name + " --help > /dev/null"):
             software_name = "ffmpeg"
+
+        # when timeout parameter is used, append 'timeout' command to cmd line so
+        # ffmpeg/avconv can be killed if it's running for more time than expected
+        if remaining_seconds is not None:
+            timeout_cmd = "timeout -k 10 {} ".format(remaining_seconds)
+        else:
+            timeout_cmd = ""
         
-        # Construct the command for avconv            
+        # Construct the command for avconv
         mp4_path = os.path.join(dir_path, os.path.basename(dir_path) + ".mp4")
         temp_img_path = os.path.basename(dir_tmp_path) + os.sep + "temp_%04d.jpg"
         com = "cd " + dir_path + ";" \
-            + software_name + " -v quiet -r "+ str(fps) +" -y -i " + temp_img_path \
+            + timeout_cmd + software_name + " -v quiet -r "+ str(fps) +" -y -i " + temp_img_path \
             + " -vcodec libx264 -pix_fmt yuv420p -crf 25 -movflags faststart -g 15 -vf \"hqdn3d=4:3:6:4.5,lutyuv=y=gammaval(0.77)\" " \
             + mp4_path
 
@@ -121,7 +152,8 @@ def generateTimelapse(dir_path, nodel) :
         root = os.path.dirname(__file__)
         ffmpeg_path = os.path.join(root, "ffmpeg.exe")
 	
-        # Construct the ecommand for ffmpeg           
+        # Construct the ecommand for ffmpeg
+        # TODO: ffmpeg timeout on Windows
         mp4_path = os.path.basename(dir_path) + ".mp4"
         temp_img_path = os.path.join(os.path.basename(dir_tmp_path), "temp_%04d.jpg")
         com = ffmpeg_path + " -v quiet -r " + str(fps) + " -i " + temp_img_path + " -c:v libx264 -pix_fmt yuv420p -an -crf 25 -g 15 -vf \"hqdn3d=4:3:6:4.5,lutyuv=y=gammaval(0.77)\" -movflags faststart -y " + mp4_path
@@ -140,6 +172,8 @@ def generateTimelapse(dir_path, nodel) :
 		
     print("Total time:", datetime.datetime.utcnow() - t1)
 
+    return 0
+
 
 if __name__ == "__main__":
 
@@ -157,6 +191,9 @@ if __name__ == "__main__":
     arg_parser.add_argument('-x', '--nodel', action="store_true", \
         help="""Do not delete generated JPG file.""")
 
+    arg_parser.add_argument('-t', '--timeout', metavar="TIMEOUT", type=int, \
+        help="""number of seconds script is allowed to run. It may get stuck due to ffmpeg/avconv bugs (supported only on Linux)""")
+
     # Parse the command line arguments
     cml_args = arg_parser.parse_args()
 
@@ -169,4 +206,5 @@ if __name__ == "__main__":
     if cml_args.fps is not None:
         fps=cml_args.fps
     #print('fps is', fps)
-    generateTimelapse(dir_path, cml_args.nodel)
+
+    return generateTimelapse(dir_path, cml_args.nodel, timeout=cml_args.timeout)
