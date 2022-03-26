@@ -77,7 +77,7 @@ setup (name = "RMS",
             'cython'],
         install_requires=requirements,
         data_files=[(os.path.join('Catalogs'), catalog_files)],
-        ext_modules = [kht_module] + cythonize(cython_modules),
+        ext_modules = [kht_module] + cythonize(cython_modules, compiler_directives={'language_level' : "3"}),
         packages=find_packages(),
         include_package_data=True,
         include_dirs=[numpy.get_include()]
