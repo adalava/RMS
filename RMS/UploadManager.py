@@ -12,16 +12,6 @@ import logging
 import binascii
 import paramiko
 
-try:
-    # Python 2
-    import Queue
-
-except:
-    # Python 3
-    import queue as Queue
-
-
-
 from RMS.Misc import mkdirP
 
 
@@ -203,7 +193,7 @@ class UploadManager(multiprocessing.Process):
 
         self.config = config
 
-        self.file_queue = Queue.Queue()
+        self.file_queue = multiprocessing.Queue()
         self.exit = multiprocessing.Event()
         self.upload_in_progress = multiprocessing.Value(ctypes.c_bool, False)
 
@@ -298,7 +288,9 @@ class UploadManager(multiprocessing.Process):
         """
 
         # Convert the queue to a list
-        file_list = [file_name for file_name in self.file_queue.queue]
+        file_list = []
+        while not self.file_queue.empty():
+            file_list.append(self.file_queue.get())
 
         # If overwrite is true, save the queue to the holding file completely
         if overwrite:
