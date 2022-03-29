@@ -611,6 +611,15 @@ class QueuedPool(object):
             
         return results
 
+    # idea taken from https://stackoverflow.com/questions/25382455/python-notimplementederror-pool-objects-cannot-be-passed-between-processes
+    def __getstate__(self):
+        self_dict = self.__dict__.copy()
+        del self_dict['pool']
+        return self_dict
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
 
 
 def exampleWorker(in_str, in_num):
