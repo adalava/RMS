@@ -17,10 +17,10 @@
 
 import os
 import time
-import logging
 import multiprocessing
 from math import floor
 
+from mlsocket import MLSocket
 import numpy as np
 import cv2
 
@@ -36,9 +36,15 @@ pyximport.install(setup_args={'include_dirs':[np.get_include()]})
 from RMS.CompressionCy import compressFrames
 
 
-# Get the logger from the main module
-log = logging.getLogger("logger")
+from RMS.Logger import Logger
 
+# Global logger
+log = None
+
+use_socket = True
+
+HOST = '127.0.0.1'
+PORT = 65432
 
 # class CompressorHandler(object):
 #     def __init__(self, data_dir, array1, startTime1, array2, startTime2, config, detector=None, 
@@ -248,8 +254,25 @@ class Compressor(multiprocessing.Process):
     def run(self):
         """ Retrieve frames from list, convert, compress and save them.
         """
+
+        global log
+        log = Logger().initLogging(self.config)
         
         n = 0
+
+        if use_socket:
+            s = MLSocket()
+            s.bind((HOST, PORT))
+            s.listen()
+            print("Listening...")
+            conn, address = s.accept()
+            print("Accepted")
+            np_load_old = np.load
+            np.load = lambda *a,**k: np_load_old(*a, allow_pickle=True, **k)
+
+            current_array = 1
+            
+
         
         # Repeat until the compressor is killed from the outside
         while not self.exit.is_set():
@@ -270,6 +293,52 @@ class Compressor(multiprocessing.Process):
                 
 
             t = time.time()
+
+            
+            # populate the array with 256 frames
+            if use_socket:
+                last_timestamp = None
+                i = 0
+                while True:
+                    i = i + 1
+                    #retrieve frame block
+                    data = conn.recv(1024*768*32)
+                    current_timestamp = data[0]
+                    frame = data[1]
+                    frame = np.asarray(frame)
+
+                    if last_timestamp is None:
+                        last_timestamp = current_timestamp
+
+
+                    if i > 255:
+                        log.error("discarding frames - buffer overflow!")
+                    else:
+                        if current_array == 1:
+                            self.array1[i, :frame.shape[0], :frame.shape[1]] = frame
+                        else:
+                            self.array1[i, :frame.shape[0], :frame.shape[1]] = frame
+                  
+                    if current_timestamp != last_timestamp:
+                        if current_array == 1:
+                            self.startTime1.value = current_timestamp
+
+                            current_array == 2
+                        else:
+                            self.startTime2.value = current_timestamp
+                            current_array == 1
+
+                        last_timestamp = None
+
+
+                        break
+
+                print("Received frames: " + str(i))
+                
+
+
+
+
 
             
             if self.startTime1.value != 0:
@@ -347,4 +416,10 @@ class Compressor(multiprocessing.Process):
         time.sleep(1.0)
         self.run_exited.set()
 
+    # tip from https://stackoverflow.com/questions/25382455/python-notimplementederror-pool-objects-cannot-be-passed-between-processes
+    def __getstate__(self):
+        self_dict = self.__dict__.copy()
+        return self_dict
 
+    def __setstate__(self, state):
+        self.__dict__.update(state)

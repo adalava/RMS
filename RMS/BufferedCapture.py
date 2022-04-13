@@ -18,15 +18,22 @@ from __future__ import print_function, division, absolute_import
 
 import re
 import time
-import logging
 from multiprocessing import Process, Event
+import threading
+from queue import Queue
+from mlsocket import MLSocket
+import numpy as np
 
 import cv2
 
 from RMS.Misc import ping
+from RMS.Logger import Logger
 
-# Get the logger from the main module
-log = logging.getLogger("logger")
+# Global logger
+log = None
+
+HOST = '127.0.0.1'
+PORT = 65432
 
 
 class BufferedCapture(Process):
@@ -186,6 +193,8 @@ class BufferedCapture(Process):
     def run(self):
         """ Capture frames.
         """
+        global log
+        log = Logger().initLogging(self.config)
         
         # Init the video device
         device = self.initVideoDevice()
@@ -226,6 +235,15 @@ class BufferedCapture(Process):
         first = True
 
         wait_for_reconnect = False
+
+        use_socket = True
+
+        if use_socket:
+            cons = CaptureConsumer()
+            queue = cons.getQueue()
+            stop_event = cons.getStopEvent()
+            cons.start()
+            
         
         # Run until stopped from the outside
         while not self.exit.is_set():
@@ -237,12 +255,12 @@ class BufferedCapture(Process):
                 self.startTime1.value = 0
             else:
                 self.startTime2.value = 0
-            
 
             # If the video device was disconnected, wait 5s for reconnection
             if wait_for_reconnect:
 
                 print('Reconnecting...')
+
 
                 while not self.exit.is_set():
 
@@ -338,7 +356,7 @@ class BufferedCapture(Process):
 
                 # Convert the frame to grayscale
                 #gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
+                
                 # Convert the frame to grayscale
                 if len(frame.shape) == 3:
 
@@ -353,21 +371,26 @@ class BufferedCapture(Process):
                 else:
                     gray = frame
 
-
                 # Cut the frame to the region of interest (ROI)
                 gray = gray[self.config.roi_up:self.config.roi_down, \
                     self.config.roi_left:self.config.roi_right]
-
-
+                
                 t_convert = time.time() - t1_convert
 
 
+                
                 # Assign the frame to shared memory
                 t1_assign = time.time()
-                if first:
-                    self.array1[i, :gray.shape[0], :gray.shape[1]] = gray
+
+                if use_socket:
+                    data = np.array([ startTime, np.array(gray) ], dtype=object)
+                    queue.put_nowait(data)
                 else:
-                    self.array2[i, :gray.shape[0], :gray.shape[1]] = gray
+                    if first:
+                        self.array1[i, :gray.shape[0], :gray.shape[1]] = gray
+                    else:
+                        self.array2[i, :gray.shape[0], :gray.shape[1]] = gray
+                
 
                 t_assignment = time.time() - t1_assign
 
@@ -384,6 +407,9 @@ class BufferedCapture(Process):
 
             if self.exit.is_set():
                 wait_for_reconnect = False
+                if use_socket:
+                    stop_event.set()
+
                 log.info('Capture exited!')
                 break
 
@@ -410,4 +436,64 @@ class BufferedCapture(Process):
         log.info('Releasing video device...')
         device.release()
         log.info('Video device released!')
+
+        if use_socket:
+            log.info('Capture Consumer stopping...')
+            cons.stop()
+            log.info('Capture Consumer waiting...')
+            cons.join()
+            log.info('Capture Consumer stopped!')
     
+class CaptureConsumer(threading.Thread):
+
+    _queue = None
+    _stop_event = threading.Event()
+
+    def __init__(self):
+        threading.Thread.__init__(self)
+        self._queue = Queue(512)
+        self._stop_event = threading.Event()
+
+    def getQueue(self):
+        return self._queue
+    
+    def getStopEvent(self):
+        return self._stop_event
+
+    def run(self):
+
+        s = MLSocket()
+        print("Connecting...")
+        s.connect((HOST, PORT))
+        print("Connected!")
+
+        t0= time.time()
+        count = 0
+
+        queue = self._queue
+
+        while True:
+            if self._stop_event.is_set():
+                break
+            # On Windows, if block is true and timeout is None, this operation
+            # goes into an uninterruptible wait on an underlying lock. This 
+            # means that no exceptions can occur, and in particular a SIGINT 
+            # will not trigger a KeyboardInterrupt.
+            # https://docs.python.org/3/library/queue.html#queue.Queue.get
+            try:
+                queue_ret = queue.get(block=True, timeout=5)
+            except:
+                print("Empty Queue. To go: " + str(queue.qsize()))
+
+            if count > 512:
+                t1 = time.time() - t0
+                fps = count/t1
+                print("Time elapsed: ", t1, " FPS: ", fps)
+                count = 0
+                t0= time.time()
+            else:
+                count = count + 1
+
+            s.send(queue_ret)
+
+        print('Thread done')
