@@ -5,7 +5,6 @@ import platform
 import os
 import shutil
 import errno
-import logging
 import subprocess
 import random
 import string
@@ -22,10 +21,6 @@ except:
 
 
 import numpy as np
-
-
-# Get the logger from the main module
-log = logging.getLogger("logger")
 
 
 def mkdirP(path):

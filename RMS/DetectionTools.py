@@ -3,7 +3,6 @@
 from __future__ import print_function, division, absolute_import
 
 import os
-import logging
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,8 +19,10 @@ pyximport.install(setup_args={'include_dirs':[np.get_include()]})
 import RMS.Routines.MorphCy as morph
 
 
+from RMS.Logger import Logger
+
 # Get the logger from the main module
-log = logging.getLogger("logger")
+log = Logger().getLogger()
 
 
 def loadImageCalibration(dir_path, config, dtype=None, byteswap=False):

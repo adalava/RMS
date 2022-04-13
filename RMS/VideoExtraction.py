@@ -18,7 +18,6 @@
 
 import math
 import time
-import logging
 from multiprocessing import Process, Event
 
 import numpy as np
@@ -28,10 +27,10 @@ from RMS.DetectionTools import loadImageCalibration, binImageCalibration
 from RMS.Routines import Grouping3D
 from RMS.Routines.MaskImage import maskImage
 from RMS.Formats import FRbin
+from RMS.Logger import Logger
 
-
-# Get the logger from the main module
-log = logging.getLogger("logger")
+# Global logger
+log = None
 
 
 class Extractor(Process):
@@ -260,6 +259,8 @@ class Extractor(Process):
     def run(self):
         """ Retrieve frames from list, convert, compress and save them.
         """
+        global log
+        log = Logger().initLogging(self.config)
         
         self.executeAll()
     

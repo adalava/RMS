@@ -20,7 +20,6 @@ import sys
 import os
 import time
 import datetime
-import logging
 import argparse
 
 import numpy as np
@@ -37,8 +36,10 @@ from RMS.DetectionTools import loadImageCalibration
 from RMS.QueuedPool import QueuedPool
 
 
+from RMS.Logger import Logger
+
 # Get the logger from the main module
-log = logging.getLogger("logger")
+log = Logger().getLogger()
 
 
 def detectStarsAndMeteors(ff_directory, ff_name, config, flat_struct=None, dark=None, mask=None):

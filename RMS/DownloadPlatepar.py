@@ -3,16 +3,13 @@
 from __future__ import print_function, division, absolute_import
 
 import datetime
-import logging
-
 import paramiko
 
-
 from RMS.UploadManager import _agentAuth
-
+from RMS.Logger import Logger
 
 # Get the logger from the main module
-log = logging.getLogger("logger")
+log = Logger().getLogger()
 
 
 

@@ -7,7 +7,6 @@ import ctypes
 import multiprocessing
 import time
 import datetime
-import logging
 
 import binascii
 import paramiko
@@ -15,8 +14,10 @@ import paramiko
 from RMS.Misc import mkdirP
 
 
-# Get the logger from the main module
-log = logging.getLogger("logger")
+from RMS.Logger import Logger
+
+# Global logger
+log = None
 
 
 def _agentAuth(transport, username, rsa_private_key):
@@ -394,6 +395,9 @@ class UploadManager(multiprocessing.Process):
 
     def run(self):
         """ Try uploading the files every 15 minutes. """
+        
+        global log
+        log = Logger().initLogging(self.config)
 
         with self.last_runtime_lock:
             self.last_runtime = None

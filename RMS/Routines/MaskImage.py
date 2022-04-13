@@ -17,16 +17,10 @@
 from __future__ import division, absolute_import, print_function
 
 import os
-import logging
 
 import numpy as np
 
 from RMS.Routines.Image import loadImage
-
-
-# Get the logger from the main module
-log = logging.getLogger("logger")
-
 
 
 class MaskStructure(object):

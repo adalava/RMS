@@ -8,14 +8,15 @@ import sys
 import shutil
 import datetime
 import time
-import logging
 
 import ephem
 
 from RMS.CaptureDuration import captureDuration
 
+from RMS.Logger import Logger
+
 # Get the logger from the main module
-log = logging.getLogger("logger")
+log = Logger().getLogger()
 
 
 def availableSpace(dirname):

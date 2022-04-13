@@ -17,7 +17,6 @@
 from __future__ import print_function, absolute_import, division
 
 import argparse
-import logging
 from time import time
 import datetime
 import sys, os
@@ -61,8 +60,10 @@ from RMS.Routines.BinImageCy import binImage
 VERBOSE_DEBUG = False
 
 
+from RMS.Logger import Logger
+
 # Get the logger from the main module
-log = logging.getLogger("logger")
+log = Logger().getLogger()
 
 
 

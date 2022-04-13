@@ -8,7 +8,6 @@ import os
 import sys
 import traceback
 import argparse
-import logging
 import random
 
 from RMS.ArchiveDetections import archiveDetections, archiveFieldsums
@@ -26,6 +25,7 @@ from RMS.Formats import CALSTARS
 from RMS.UploadManager import UploadManager
 from RMS.Routines.Image import saveImage
 from RMS.Routines.MaskImage import loadMask
+from RMS.Logger import Logger
 from Utils.CalibrationReport import generateCalibrationReport
 from Utils.FOVKML import fovKML
 from Utils.MakeFlat import makeFlat
@@ -35,7 +35,7 @@ from Utils.ShowerAssociation import showerAssociation
 
 
 # Get the logger from the main module
-log = logging.getLogger("logger")
+log = Logger().getLogger()
 
 
 

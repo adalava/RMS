@@ -22,51 +22,89 @@ import logging
 import logging.handlers
 import datetime
 
+from sympy import false, true
+
 from RMS.Misc import mkdirP
 
+class Logger(object):
+    _instance = None
+    _log = None
+    _config = None
+    _initialized = false
+    DEBUG = logging.DEBUG
 
-def initLogging(config, log_file_prefix=""):
-    """ Initializes the logger. 
-    
-    Arguments:
-        log_file_prefix: [str] String which will be prefixed to the log file. Empty string by default.
+    #def instance(cls, config = None):
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(Logger, cls).__new__(cls)
 
-    """
+        return cls._instance
 
-    # Path to the directory with log files
-    log_path = os.path.join(config.data_dir, config.log_dir)
-
-    # Make directories
-    mkdirP(config.data_dir)
-    mkdirP(log_path)
-
-    # Generate a file name for the log file
-    log_file_name = log_file_prefix + "log_" + str(config.stationID) + "_" + datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f') + ".log"
+    def initLogging(self, config, log_file_prefix=""):
+        """ Initializes the logger. 
         
-    # Init logging
-    log = logging.getLogger('logger')
-    log.setLevel(logging.INFO)
-    log.setLevel(logging.DEBUG)
+        Arguments:
+            log_file_prefix: [str] String which will be prefixed to the log file. Empty string by default.
 
-    # Make a new log file each day
-    handler = logging.handlers.TimedRotatingFileHandler(os.path.join(log_path, log_file_name), when='D', \
-        interval=1) 
-    handler.setLevel(logging.INFO)
-    handler.setLevel(logging.DEBUG)
+        """
 
-    # Set the log formatting
-    formatter = logging.Formatter(fmt='%(asctime)s-%(levelname)s-%(module)s-line:%(lineno)d - %(message)s', 
-        datefmt='%Y/%m/%d %H:%M:%S')
-    handler.setFormatter(formatter)
-    log.addHandler(handler)
-
-    # Stream all logs to stdout as well
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG)
-    formatter = logging.Formatter(fmt='%(asctime)s-%(levelname)s-%(module)s-line:%(lineno)d - %(message)s', 
-        datefmt='%Y/%m/%d %H:%M:%S')
-    ch.setFormatter(formatter)
-    log.addHandler(ch)
+        # Init logging
+        log = logging.getLogger()
+        log.setLevel(logging.INFO)
+        log.setLevel(logging.DEBUG)
 
 
+        # Path to the directory with log files
+        log_path = os.path.join(config.data_dir, config.log_dir)
+
+        # Make directories
+        mkdirP(config.data_dir)
+        mkdirP(log_path)
+
+        # Generate a file name for the log file
+        log_file_name = log_file_prefix + "log_" + str(config.stationID) + "_" + datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f') + ".log"
+        
+
+        # Make a new log file each day
+        handler = logging.handlers.TimedRotatingFileHandler(os.path.join(log_path, log_file_name), when='D', \
+            interval=1) 
+        handler.setLevel(logging.INFO)
+        handler.setLevel(logging.DEBUG)
+
+        # Set the log formatting
+        formatter = logging.Formatter(fmt='%(asctime)s-%(levelname)s-%(module)s-line:%(lineno)d - %(message)s', 
+            datefmt='%Y/%m/%d %H:%M:%S')
+        handler.setFormatter(formatter)
+        log.addHandler(handler)
+
+        # Stream all logs to stdout as well
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(logging.DEBUG)
+        formatter = logging.Formatter(fmt='%(asctime)s-%(levelname)s-%(module)s-line:%(lineno)d - %(message)s', 
+            datefmt='%Y/%m/%d %H:%M:%S')
+        ch.setFormatter(formatter)
+        log.addHandler(ch)
+
+        # send log through sockets
+        socket_handler = logging.handlers.SocketHandler('localhost', 9020)
+        socket_handler.setLevel(logging.INFO)
+        socket_handler.setLevel(logging.DEBUG)
+        log.addHandler(socket_handler)
+
+        self._initialized = true
+        
+
+        return log
+
+    def getLogger(self):
+        # in order to keep looging behavior, just return the logging object if consig is not set
+#        print(self._config)
+
+        #if self._config == None:
+        #    raise RuntimeError('Call instance() instead')
+
+        #if self._initialized == false:
+        #    self.initLogging()
+
+        return logging.getLogger()
 

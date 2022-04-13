@@ -25,7 +25,6 @@ import datetime
 import signal
 import shutil
 import ctypes
-import logging
 import multiprocessing
 import traceback
 
@@ -35,7 +34,7 @@ import numpy as np
 from Utils.LiveViewer import LiveViewer
 
 import RMS.ConfigReader as cr
-from RMS.Logger import initLogging
+from RMS.Logger import Logger
 from RMS.BufferedCapture import BufferedCapture
 from RMS.CaptureDuration import captureDuration
 from RMS.Compression import Compressor
@@ -653,12 +652,8 @@ if __name__ == "__main__":
     # Load the config file
     config = cr.loadConfigFromDirectory(cml_args.config, os.path.abspath('.'))
 
-    # Initialize the logger
-    initLogging(config)
-
-    # Get the logger handle
-    log = logging.getLogger("logger")
-
+    # Initialize the logger and get logger handle
+    log = Logger().initLogging(config)
 
     log.info("Program start")
     log.info("Station code: {:s}".format(str(config.stationID)))
