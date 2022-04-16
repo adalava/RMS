@@ -32,6 +32,9 @@ from RMS.Logger import Logger
 # Global logger
 log = None
 
+
+# TODO: fixed port number is a problem when multiple RMS intances are running on same
+# machine
 HOST = '127.0.0.1'
 PORT = 65432
 
@@ -382,6 +385,8 @@ class BufferedCapture(Process):
                 # Assign the frame to shared memory
                 t1_assign = time.time()
 
+                # Individual frames are encoded and enqueued to CaptureConsumer instance
+                # when using the socket approach
                 if use_socket:
                     data = np.array([ startTime, np.array(gray) ], dtype=object)
                     queue.put_nowait(data)
@@ -443,7 +448,11 @@ class BufferedCapture(Process):
             log.info('Capture Consumer waiting...')
             cons.join()
             log.info('Capture Consumer stopped!')
-    
+
+'''
+    When using socket, BufferedCapture uses this class to send data to
+    Compression
+''' 
 class CaptureConsumer(threading.Thread):
 
     _queue = None

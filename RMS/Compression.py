@@ -295,13 +295,16 @@ class Compressor(multiprocessing.Process):
             t = time.time()
 
             
-            # populate the array with 256 frames
+            # when using socket approach the array isn't a memory shared wuth BufferedCapture,
+            # it's received via socket. So need to populate the existing array with 256 frames
+            # before letting processing continue
             if use_socket:
                 last_timestamp = None
                 i = 0
                 while True:
                     i = i + 1
-                    #retrieve frame block
+
+                    #retrieve a single frame
                     data = conn.recv(1024*768*32)
                     current_timestamp = data[0]
                     frame = data[1]
@@ -335,9 +338,6 @@ class Compressor(multiprocessing.Process):
 
                 print("Received frames: " + str(i))
                 
-
-
-
 
 
             
