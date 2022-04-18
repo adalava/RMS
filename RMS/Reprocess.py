@@ -483,11 +483,9 @@ if __name__ == "__main__":
 
     
     ### Init the logger
-
-    from RMS.Logger import initLogging
-    initLogging(config, 'reprocess_')
-
-    log = logging.getLogger("logger")
+   
+    # TODO Identify the module in logger?
+    log = Logger().getLogger()
 
     ######
 

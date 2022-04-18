@@ -22,6 +22,9 @@ except:
 
 import numpy as np
 
+# Global logger
+log = None
+
 
 def mkdirP(path):
     """ Makes a directory and handles all errors.
