@@ -33,6 +33,8 @@ def _agentAuth(transport, username, rsa_private_key):
         [bool] True if successfull, False otherwise.
     """
 
+    log = Logger().getLogger()
+
     # Try loading the private key
     ki = None
     try:
@@ -86,6 +88,8 @@ def uploadSFTP(hostname, username, dir_local, dir_remote, file_list, port=22,
         [bool] True if upload successful, false otherwise.
     """
 
+    log = Logger().getLogger()
+
     # If the file list is empty, don't do anything
     if not file_list:
         log.info('No files to upload!')
@@ -135,7 +139,7 @@ def uploadSFTP(hostname, username, dir_local, dir_remote, file_list, port=22,
                 
                 # If the remote and the local file are of the same size, skip it
                 if local_file_size == remote_info.st_size:
-                    log.info('The file already exists on the server!')
+                    self.log.info('The file already exists on the server!')
                     continue
             
             except IOError as e:
@@ -189,6 +193,7 @@ class UploadManager(multiprocessing.Process):
         
         """
 
+        self.log = Logger().initLogging(config)
 
         super(UploadManager, self).__init__()
 
@@ -258,8 +263,15 @@ class UploadManager(multiprocessing.Process):
 
         # Read the queue file
         with open(self.upload_queue_file_path) as f:
-            
+
+            file_list = []
+
+            # remove duplicated entries
             for file_name in f:
+                if file_name not in file_list:
+                    file_list.append(file_name)
+            
+            for file_name in file_list:
 
                 file_name = file_name.replace('\n', '').replace('\r', '')
 
@@ -269,14 +281,11 @@ class UploadManager(multiprocessing.Process):
 
                 # Make sure the file for upload exists
                 if not os.path.isfile(file_name):
-                    log.warning("Local file not found: {:s}".format(file_name))
-                    log.warning("Skipping it...")
+                    self.log.warning("Local file not found: {:s}".format(file_name))
+                    self.log.warning("Skipping it...")
                     continue
 
-
-                # Add the file if it was not already in the queue
-                if not file_name in self.file_queue.queue:
-                    self.file_queue.put(file_name)
+                self.file_queue.put(file_name)
 
 
 
@@ -360,14 +369,14 @@ class UploadManager(multiprocessing.Process):
 
             # If the upload was successful, rewrite the holding file, which will remove the uploaded file
             if upload_status:
-                log.info('Upload successful!')
+                self.log.info('Upload successful!')
                 self.saveQueue(overwrite=True)
                 tries = 0
 
             # If the upload failed, put the file back on the list and wait a bit
             else:
 
-                log.warning('Uploading failed! Retry {:d} of {:d}'.format(tries + 1, retries))
+                self.log.warning('Uploading failed! Retry {:d} of {:d}'.format(tries + 1, retries))
 
                 tries += 1 
                 self.file_queue.put(file_name)
@@ -389,16 +398,13 @@ class UploadManager(multiprocessing.Process):
         with self.next_runtime_lock:
             self.next_runtime = datetime.datetime.utcnow() + datetime.timedelta(seconds=delay)
 
-            log.info("Upload delayed for {:.1f} min until {:s}".format(delay/60, str(self.next_runtime)))
+            self.log.info("Upload delayed for {:.1f} min until {:s}".format(delay/60, str(self.next_runtime)))
 
 
 
     def run(self):
         """ Try uploading the files every 15 minutes. """
         
-        global log
-        log = Logger().initLogging(self.config)
-
         with self.last_runtime_lock:
             self.last_runtime = None
 

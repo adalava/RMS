@@ -38,9 +38,6 @@ from RMS.CompressionCy import compressFrames
 
 from RMS.Logger import Logger
 
-# Global logger
-log = None
-
 use_socket = True
 
 HOST = '127.0.0.1'
@@ -89,6 +86,7 @@ class Compressor(multiprocessing.Process):
     """
 
     running = False
+    log = None
     
     def __init__(self, data_dir, array1, startTime1, array2, startTime2, config, detector=None):
         """
@@ -120,6 +118,8 @@ class Compressor(multiprocessing.Process):
         self.exit = multiprocessing.Event()
 
         self.run_exited = multiprocessing.Event()
+
+        self.log = Logger().initLogging(self.config)
     
 
 
@@ -182,7 +182,8 @@ class Compressor(multiprocessing.Process):
 
     def saveLiveJPG(self, array, startTime):
         """ Save a live.jpg file to the data directory with the latest compressed image. """
-
+        
+        log = self.log
 
         # Name of the file
         live_name = 'live.jpg'
@@ -211,7 +212,7 @@ class Compressor(multiprocessing.Process):
     def stop(self):
         """ Stop compression.
         """
-        
+        log = self.log
 
         self.exit.set()
         log.debug('Compression exit flag set')
@@ -255,8 +256,7 @@ class Compressor(multiprocessing.Process):
         """ Retrieve frames from list, convert, compress and save them.
         """
 
-        global log
-        log = Logger().initLogging(self.config)
+        log = self.log
         
         n = 0
 
@@ -264,9 +264,9 @@ class Compressor(multiprocessing.Process):
             s = MLSocket()
             s.bind((HOST, PORT))
             s.listen()
-            print("Listening...")
+            log.debug("Socket listening...")
             conn, address = s.accept()
-            print("Accepted")
+            log.debug("Socket connection accepted")
             np_load_old = np.load
             np.load = lambda *a,**k: np_load_old(*a, allow_pickle=True, **k)
 
@@ -305,9 +305,14 @@ class Compressor(multiprocessing.Process):
                     i = i + 1
 
                     #retrieve a single frame
-                    data = conn.recv(1024*768*32)
-                    current_timestamp = data[0]
-                    frame = data[1]
+                    try:
+                        data = conn.recv(1024*768*32)
+                        current_timestamp = data[0]
+                        frame = data[1]
+                    except:
+                        log.error("Exception while receiving data from socket! {}".format(len(data)))
+                        return None
+
                     frame = np.asarray(frame)
 
                     if last_timestamp is None:
@@ -332,15 +337,11 @@ class Compressor(multiprocessing.Process):
                             current_array == 1
 
                         last_timestamp = None
-
-
                         break
 
-                print("Received frames: " + str(i))
-                
+                log.info("Received frames: " + str(i))
 
 
-            
             if self.startTime1.value != 0:
 
                 # Retrieve time of first frame
@@ -359,25 +360,25 @@ class Compressor(multiprocessing.Process):
                 frames = self.array2
                 self.startTime2.value = 0
 
-            
+
             log.debug("Compressing frame block with start time at: {:s}".format(str(startTime)))
 
             #log.debug("memory copy: " + str(time.time() - t) + "s")
             t = time.time()
-            
+
             # Run the compression
             compressed, field_intensities = self.compress(frames)
 
             # Cut out the compressed frames to the proper size
             compressed = compressed[:, :self.config.height, :self.config.width]
-            
+
             log.debug("Compression time: {:.3f} s".format(time.time() - t))
             t = time.time()
-            
+
             # Save the compressed image
             filename = self.saveFF(compressed, startTime, n*256)
             n += 1
-            
+
             log.debug("Saving time: {:.3f} s".format(time.time() - t))
 
 

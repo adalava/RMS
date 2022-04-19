@@ -44,6 +44,7 @@ class BufferedCapture(Process):
     """
     
     running = False
+    _log = None
     
     def __init__(self, array1, startTime1, array2, startTime2, config, video_file=None):
         """ Populate arrays with (startTime, frames) after startCapture is called.
@@ -76,7 +77,8 @@ class BufferedCapture(Process):
         self.time_for_drop = 1.5*(1.0/config.fps)
 
         self.dropped_frames = 0
-    
+
+        self._log = Logger().initLogging(self.config)
 
 
     def startCapture(self, cameraID=0):
@@ -96,6 +98,7 @@ class BufferedCapture(Process):
     def stopCapture(self):
         """ Stop capture.
         """
+        log = self._log
         
         self.exit.set()
 
@@ -117,6 +120,8 @@ class BufferedCapture(Process):
 
     def initVideoDevice(self):
         """ Initialize the video device. """
+
+        log = self._log
 
         device = None
 
@@ -149,7 +154,7 @@ class BufferedCapture(Process):
 
                     for i in range(500):
 
-                        print('Trying to ping the IP camera...')
+                        log.info('Trying to ping the IP camera...')
                         ping_success = ping(ip)
 
                         if ping_success:
@@ -196,8 +201,7 @@ class BufferedCapture(Process):
     def run(self):
         """ Capture frames.
         """
-        global log
-        log = Logger().initLogging(self.config)
+        log = self._log
         
         # Init the video device
         device = self.initVideoDevice()
@@ -242,12 +246,12 @@ class BufferedCapture(Process):
         use_socket = True
 
         if use_socket:
-            cons = CaptureConsumer()
+            cons = CaptureConsumer(self.config)
             queue = cons.getQueue()
             stop_event = cons.getStopEvent()
             cons.start()
-            
-        
+
+
         # Run until stopped from the outside
         while not self.exit.is_set():
 
@@ -262,7 +266,7 @@ class BufferedCapture(Process):
             # If the video device was disconnected, wait 5s for reconnection
             if wait_for_reconnect:
 
-                print('Reconnecting...')
+                log.info('Reconnecting...')
 
 
                 while not self.exit.is_set():
@@ -276,7 +280,7 @@ class BufferedCapture(Process):
 
 
                     if device is None:
-                        print("The video device couldn't be connected! Retrying...")
+                        log.info("The video device couldn't be connected! Retrying...")
                         continue
 
 
@@ -444,7 +448,8 @@ class BufferedCapture(Process):
 
         if use_socket:
             log.info('Capture Consumer stopping...')
-            cons.stop()
+            stop_event.set()
+            #cons.stop()
             log.info('Capture Consumer waiting...')
             cons.join()
             log.info('Capture Consumer stopped!')
@@ -456,12 +461,14 @@ class BufferedCapture(Process):
 class CaptureConsumer(threading.Thread):
 
     _queue = None
+    _log = None
     _stop_event = threading.Event()
 
-    def __init__(self):
+    def __init__(self, config):
         threading.Thread.__init__(self)
         self._queue = Queue(512)
         self._stop_event = threading.Event()
+        self._log = Logger().initLogging(config)
 
     def getQueue(self):
         return self._queue
@@ -471,10 +478,12 @@ class CaptureConsumer(threading.Thread):
 
     def run(self):
 
+        log = self._log
+
         s = MLSocket()
-        print("Connecting...")
+        log.info("Socket connecting...")
         s.connect((HOST, PORT))
-        print("Connected!")
+        log.info("Socket connected!")
 
         t0= time.time()
         count = 0
@@ -492,17 +501,21 @@ class CaptureConsumer(threading.Thread):
             try:
                 queue_ret = queue.get(block=True, timeout=5)
             except:
-                print("Empty Queue. To go: " + str(queue.qsize()))
+                log.debug("Empty Queue. To go: " + str(queue.qsize()))
 
             if count > 512:
                 t1 = time.time() - t0
                 fps = count/t1
-                print("Time elapsed: ", t1, " FPS: ", fps)
+                log.debug("Time elapsed: {}  FPS: {}".format(t1, fps))
                 count = 0
                 t0= time.time()
             else:
                 count = count + 1
 
-            s.send(queue_ret)
+            try:
+                s.send(queue_ret)
+            except:
+                log.error("Can't send frames to Compression module through socket.")
+                pass
 
-        print('Thread done')
+        log.info('CaptureConsumer Thread finished.')
