@@ -8,6 +8,20 @@ from setuptools import setup, Extension, find_packages
 from Cython.Build import cythonize
 
 
+if 'win' in sys.platform:
+    # Microsoft C++ doesn't have -O3.
+    optimization_level = "-O2"
+
+    # workaround for "unresolved symbol PyInit_kht_module" while linking
+    # https://stackoverflow.com/questions/58797673/how-to-compile-init-py-file-using-cython-on-windows
+    from distutils.command.build_ext import build_ext
+    def get_export_symbols_fixed(self, ext):
+        #pass
+        return []
+    build_ext.get_export_symbols = get_export_symbols_fixed
+else:
+    optimization_level = "-O3"
+
 kht_module = Extension("kht_module",
                     sources = ["Native/Hough/kht.cpp",
                                "Native/Hough/buffer_2d.cpp",
@@ -17,7 +31,7 @@ kht_module = Extension("kht_module",
                                "Native/Hough/subdivision.cpp",
                                "Native/Hough/voting.cpp"],
                     include_dirs = ["Native/Hough/"],
-                    extra_compile_args=["-O3", "-Wall"])
+                    extra_compile_args = [optimization_level, "-Wall"])
 
 
 

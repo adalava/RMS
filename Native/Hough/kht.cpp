@@ -61,7 +61,7 @@ kht(lines_list_t &lines, unsigned char *binary_image, const size_t image_width, 
 	peak_detection( lines, accumulator );
 }
 
-extern "C" size_t
+extern "C" __declspec(dllexport) size_t
 kht_wrapper(double (*lines_array)[2], unsigned char *binary_image, const size_t image_width, const size_t image_height, const size_t lines_max,
 			const size_t cluster_min_size, const double cluster_min_deviation, const double delta, const double kernel_min_height,
 			const double n_sigmas)
