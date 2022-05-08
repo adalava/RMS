@@ -38,10 +38,6 @@ from RMS.QueuedPool import QueuedPool
 
 from RMS.Logger import Logger
 
-# Get the logger from the main module
-log = Logger().getLogger()
-
-
 def detectStarsAndMeteors(ff_directory, ff_name, config, flat_struct=None, dark=None, mask=None):
     """ Run the star extraction and subsequently runs meteor detection on the FF file if there are enough
         stars on the image.
@@ -60,6 +56,7 @@ def detectStarsAndMeteors(ff_directory, ff_name, config, flat_struct=None, dark=
         [ff_name, star_list, meteor_list] detected stars and meteors
 
     """
+    log = Logger().initLogging(config)
 
     log.info('Running detection on file: ' + ff_name)
 
@@ -122,6 +119,7 @@ def saveDetections(detection_results, ff_dir, config):
         ftpdetectinfo_name: [str] Name of the FTPdetectinfo file.
         ff_detected: [list] A list of FF files with detections.
     """
+    log = Logger().initLogging(config)
 
 
     ### SAVE DETECTIONS TO FILE
@@ -223,6 +221,7 @@ def detectStarsAndMeteorsDirectory(dir_path, config):
         ftpdetectinfo_name: [str] Name of the FTPdetectinfo file.
         ff_detected: [list] A list of FF files with detections.
     """
+    log = Logger().initLogging(config)
 
     # Get paths to every FF bin file in a directory 
     ff_dir = dir_path
@@ -233,11 +232,11 @@ def detectStarsAndMeteorsDirectory(dir_path, config):
     # Check if there are any file in the directory
     if not len(ff_list):
 
-        print("No files for processing found!")
+        log.info("No files for processing found!")
         return None, None, None, None
 
 
-    print('Starting detection...')
+    log.info('Starting detection...')
 
     # Initialize the detector
     detector = QueuedPool(detectStarsAndMeteors, cores=-1, log=log, backup_dir=ff_dir)
@@ -252,7 +251,7 @@ def detectStarsAndMeteorsDirectory(dir_path, config):
             
             # Add a job as long as there are available workers to receive it
             if detector.available_workers.value() > 0:
-                print('Adding for detection:', ff_name)
+                log.info('Adding for detection:', ff_name)
                 detector.addJob([ff_dir, ff_name, config], wait_time=0)
                 break
             else:

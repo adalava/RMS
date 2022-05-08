@@ -62,10 +62,6 @@ VERBOSE_DEBUG = False
 
 from RMS.Logger import Logger
 
-# Get the logger from the main module
-log = Logger().getLogger()
-
-
 
 def logDebug(*log_str):
     """ Log detection debug messages. """

@@ -29,9 +29,6 @@ from RMS.Routines.MaskImage import maskImage
 from RMS.Formats import FRbin
 from RMS.Logger import Logger
 
-# Global logger
-log = None
-
 
 class Extractor(Process):
     """ Detects fireballs and brighter meteors on the FF files, and extracts raw frames while they are still
@@ -51,6 +48,8 @@ class Extractor(Process):
         
         self.config = config
         self.data_dir = data_dir
+
+        self._log = Logger().initLogging(self.config)
 
         # Load the calibration files (only the mask is used currently)
         self.mask, self.dark, self.flat_struct = loadImageCalibration(self.data_dir, self.config)
@@ -259,15 +258,15 @@ class Extractor(Process):
     def run(self):
         """ Retrieve frames from list, convert, compress and save them.
         """
-        global log
-        log = Logger().initLogging(self.config)
-        
+       
         self.executeAll()
     
 
 
     def executeAll(self):
         """ Run the complete extraction procedure. """
+
+        log = self._log
 
         # Apply the mask to the compressed frames (maxpixel, avepixel)
         if self.mask is not None:
