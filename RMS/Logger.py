@@ -64,7 +64,7 @@ class Logger(object):
         # Generate a file name for the log file
         log_file_name = log_file_prefix + "log_" + str(config.stationID) + "_" + datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f') + ".log"
         
-
+        '''
         # Make a new log file each day
         handler = logging.handlers.TimedRotatingFileHandler(os.path.join(log_path, log_file_name), when='D', \
             interval=1) 
@@ -76,6 +76,7 @@ class Logger(object):
             datefmt='%Y/%m/%d %H:%M:%S')
         handler.setFormatter(formatter)
         log.addHandler(handler)
+        '''
 
         # Stream all logs to stdout as well
         ch = logging.StreamHandler(sys.stdout)
