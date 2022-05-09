@@ -746,7 +746,12 @@ if __name__ == "__main__":
         # Calculate when and how should the capture run
         start_time, duration = captureDuration(config.latitude, config.longitude, config.elevation)
 
-        log.info('Next start time: ' + str(start_time) + ' UTC')
+        if start_time == True:
+            next_start_text = "right now!"
+        else:
+            next_start_text = str(start_time) + ' UTC'
+
+        log.info('Next start time: ' + next_start_text )
 
         # Reboot the computer after processing is done for the previous night
         if ran_once and config.reboot_after_processing:
