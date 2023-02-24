@@ -61,6 +61,7 @@ pip install -r requirements.txt
 
 # Run the python setup
 pip install .
+python setup.py build_ext --inplace
 
 # Copy the config and mask files back
 if [ $# -eq 0 ]; then
