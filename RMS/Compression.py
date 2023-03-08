@@ -141,11 +141,11 @@ class Compressor(multiprocessing.Process):
 
 
     def saveLiveJPG(self, array, startTime):
-        """ Save a live.jpg file to the data directory with the latest compressed image. """
+        """ Save a <station_ID>_live.jpg file to the data directory with the latest compressed image. """
 
 
         # Name of the file
-        live_name = 'live.jpg'
+        live_name = self.config.stationID + '_live.jpg'
 
         # Generate the name for the file
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(startTime))
