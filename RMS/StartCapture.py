@@ -672,6 +672,8 @@ if __name__ == "__main__":
     arg_parser.add_argument('-r', '--resume', action="store_true", \
         help="""Resume capture into the last night directory in CapturedFiles. """)
 
+    arg_parser.add_argument('--data_dir', nargs=1, metavar='DATA_PATH', type=str, \
+        help="""Overides configuration file data_dir parameter. """)
 
     # Parse the command line arguments
     cml_args = arg_parser.parse_args()
@@ -695,6 +697,11 @@ if __name__ == "__main__":
     # Change the Ctrl+C action to the special handle
     setSIGINT()
 
+
+    # Override data_dir if user requested it
+    if cml_args.data_dir:
+        log.info("Data directory set to: " + cml_args.data_dir[0])
+        config.data_dir = cml_args.data_dir[0]
 
     # Make the data directories
     root_dir = os.path.abspath(config.data_dir)
