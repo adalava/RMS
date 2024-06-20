@@ -14,5 +14,4 @@ python-dvr>=0.0.1
 pyqtgraph>=0.12
 pyyaml
 tflite
-
-
+opencv-python
