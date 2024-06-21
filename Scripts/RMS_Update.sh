@@ -76,9 +76,6 @@ fi
 # make sure the correct requirements are installed
 pip install -r requirements.txt
 
-pip uninstall -y imreg_dft
-pip install --force-reinstall git+https://github.com/matejak/imreg_dft@master#egg=imreg_dft
-
 # Run the python setup
 pip install .
 python setup.py build_ext --inplace
