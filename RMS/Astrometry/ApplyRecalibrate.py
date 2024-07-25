@@ -910,7 +910,7 @@ def recalibrateIndividualFFsAndApplyAstrometry(
         meteor_output_list.append([ff_name, meteor_No, rho, phi, meteor_picks])
 
     # Calibration string to be written to the FTPdetectinfo file
-    calib_str = 'Recalibrated with RMS on: ' + str(datetime.datetime.utcnow()) + ' UTC'
+    calib_str = 'Recalibrated with RMS on: ' + str(datetime.datetime.now(datetime.UTC)) + ' UTC'
 
     # If no meteors were detected, set dummpy parameters
     if len(meteor_list) == 0:
@@ -922,7 +922,7 @@ def recalibrateIndividualFFsAndApplyAstrometry(
         shutil.copy(
             ftpdetectinfo_path,
             ftpdetectinfo_path.strip('.txt')
-            + '_backup_{:s}.txt'.format(datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f')),
+            + '_backup_{:s}.txt'.format(datetime.datetime.now(datetime.UTC).strftime('%Y%m%d_%H%M%S.%f')),
         )
     except:
         log.info('ERROR! The FTPdetectinfo file could not be backed up: {:s}'.format(ftpdetectinfo_path))

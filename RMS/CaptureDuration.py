@@ -38,7 +38,7 @@ def captureDuration(lat, lon, elevation, current_time=None, max_hours=23):
 
     # If the current time is not given, use the current time
     if current_time is None:
-        current_time = datetime.datetime.utcnow()
+        current_time = datetime.datetime.now(datetime.UTC)
 
     # Set the current time
     o.date = current_time

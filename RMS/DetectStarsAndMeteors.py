@@ -285,7 +285,7 @@ def detectStarsAndMeteorsDirectory(dir_path, config):
 
 if __name__ == "__main__":
 
-    time_start = datetime.datetime.utcnow()
+    time_start = datetime.datetime.now(datetime.UTC)
 
 
     ### COMMAND LINE ARGUMENTS
@@ -324,4 +324,4 @@ if __name__ == "__main__":
     # Delete backup files
     detector.deleteBackupFiles()
 
-    log.info('Total time taken: {}'.format(datetime.datetime.utcnow() - time_start))
+    log.info('Total time taken: {}'.format(datetime.datetime.now(datetime.UTC) - time_start))

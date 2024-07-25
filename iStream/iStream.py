@@ -34,7 +34,7 @@ def rmsExternal(captured_night_dir, archived_night_dir, config):
     # Compute the capture duration from now
     start_time, duration = captureDuration(config.latitude, config.longitude, config.elevation)
 
-    timenow = datetime.datetime.utcnow()
+    timenow = datetime.datetime.now(datetime.UTC)
     remaining_seconds = 0
 
     # Compute how long to wait before capture

@@ -50,7 +50,7 @@ def initLogging(config, log_file_prefix="", safedir=None):
             log_path = safedir
 
     # Generate a file name for the log file
-    log_file_name = log_file_prefix + "log_" + str(config.stationID) + "_" + datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f') + ".log"
+    log_file_name = log_file_prefix + "log_" + str(config.stationID) + "_" + datetime.datetime.now(datetime.UTC).strftime('%Y%m%d_%H%M%S.%f') + ".log"
         
     # Init logging
     log = logging.getLogger('logger')

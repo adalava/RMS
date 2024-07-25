@@ -201,9 +201,9 @@ if __name__ == "__main__":
 
     # ### ###
 
-    print("Current UTC time is: {}".format(datetime.datetime.utcnow()))
-    print("Current Julian date is: {:.12f}".format(datetime2JD(datetime.datetime.utcnow())))
-    print("Current solar longitude: {:.6f} deg".format(np.degrees(jd2SolLonSteyaert(datetime2JD(datetime.datetime.utcnow())))))
+    print("Current UTC time is: {}".format(datetime.datetime.now(datetime.UTC)))
+    print("Current Julian date is: {:.12f}".format(datetime2JD(datetime.datetime.now(datetime.UTC))))
+    print("Current solar longitude: {:.6f} deg".format(np.degrees(jd2SolLonSteyaert(datetime2JD(datetime.datetime.now(datetime.UTC))))))
 
 
     # Test inverse function
