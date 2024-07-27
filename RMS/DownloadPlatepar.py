@@ -82,7 +82,7 @@ def downloadNewPlatepar(config, port=22):
 
     # Construct a new name with the time of the download included
     dl_pp_name = remote_platepar_path + 'platepar_dl_' \
-        + datetime.datetime.now(datetime.UTC).strftime('%Y%m%d_%H%M%S.%f') + '.cal'
+        + datetime.datetime.utcnow().strftime('%Y%m%d_%H%M%S.%f') + '.cal'
 
     sftp.posix_rename(remote_platepar, dl_pp_name)
 

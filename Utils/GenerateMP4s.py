@@ -30,7 +30,7 @@ from RMS.Misc import mkdirP
 
 
 def generateMP4s(dir_path, ftpfile_name, shower_code=None, min_mag=None, config=None):
-    t1 = datetime.datetime.now(datetime.UTC)
+    t1 = datetime.datetime.utcnow()
 
     # Load the font for labeling
     try:
@@ -190,7 +190,7 @@ def generateMP4s(dir_path, ftpfile_name, shower_code=None, min_mag=None, config=
 
             print("Deleted temporary directory : " + dir_tmp_path)
 
-    print("Total time:", datetime.datetime.now(datetime.UTC) - t1)
+    print("Total time:", datetime.datetime.utcnow() - t1)
 
 
 if __name__ == "__main__":
