@@ -2890,7 +2890,7 @@ class PlateTool(QtWidgets.QMainWindow):
             # Change distortion type to poly3+radial5
             if (event.key() == QtCore.Qt.Key_3) and (modifiers == QtCore.Qt.ControlModifier):
 
-                self.dist_type_index = 2
+                self.dist_type_index = 6
                 self.changeDistortionType()
                 self.tab.param_manager.updatePlatepar()
                 self.updateLeftLabels()
@@ -2900,7 +2900,7 @@ class PlateTool(QtWidgets.QMainWindow):
             # Change distortion type to radial3
             elif (event.key() == QtCore.Qt.Key_4) and (modifiers == QtCore.Qt.ControlModifier):
 
-                self.dist_type_index = 3
+                self.dist_type_index = 7
                 self.changeDistortionType()
                 self.tab.param_manager.updatePlatepar()
                 self.updateLeftLabels()
@@ -2910,7 +2910,7 @@ class PlateTool(QtWidgets.QMainWindow):
             # Change distortion type to radial5
             elif (event.key() == QtCore.Qt.Key_5) and (modifiers == QtCore.Qt.ControlModifier):
 
-                self.dist_type_index = 4
+                self.dist_type_index = 8
                 self.changeDistortionType()
                 self.tab.param_manager.updatePlatepar()
                 self.updateLeftLabels()
@@ -2920,7 +2920,7 @@ class PlateTool(QtWidgets.QMainWindow):
             # Change distortion type to radial7
             elif (event.key() == QtCore.Qt.Key_6) and (modifiers == QtCore.Qt.ControlModifier):
 
-                self.dist_type_index = 5
+                self.dist_type_index = 9
                 self.changeDistortionType()
                 self.tab.param_manager.updatePlatepar()
                 self.updateLeftLabels()
@@ -2930,7 +2930,7 @@ class PlateTool(QtWidgets.QMainWindow):
             # Change distortion type to radial9
             elif (event.key() == QtCore.Qt.Key_7) and (modifiers == QtCore.Qt.ControlModifier):
 
-                self.dist_type_index = 6
+                self.dist_type_index = 10
                 self.changeDistortionType()
                 self.tab.param_manager.updatePlatepar()
                 self.updateLeftLabels()
@@ -5059,7 +5059,17 @@ class PlateTool(QtWidgets.QMainWindow):
 
             # Compute the background subtracted intensity sum (do as a float to avoid artificially pumping
             #   up the magnitude)
-            pick['intensity_sum'] = np.ma.sum(crop_img.astype(float) - background_lvl).astype(int)
+            intensity_sum = np.ma.sum(crop_img.astype(float) - background_lvl)
+
+            # Check if the result is masked
+            if np.ma.is_masked(intensity_sum):
+                # If the result is masked (i.e. error reading pixels), set the intensity sum to 1
+                intensity_sum = 1  
+            else:
+                intensity_sum = intensity_sum.astype(int)
+
+            # Set the intensity sum to the pick
+            pick['intensity_sum'] = intensity_sum
 
 
             # If the DFN image is used, correct intensity sum for exposure difference
@@ -5341,6 +5351,10 @@ class PlateTool(QtWidgets.QMainWindow):
             # If the global shutter is used, the frame number can only be an integer
             if self.config.deinterlace_order == -2:
                 frame_no = round(frame_no, 0)
+
+            # If the intensity sum is masked, assume it's 1
+            if np.ma.is_masked(pick['intensity_sum']):
+                pick['intensity_sum'] = 1
             
             centroids.append([frame_no, pick['x_centroid'], pick['y_centroid'], pick['intensity_sum']])
 
