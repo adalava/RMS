@@ -1,5 +1,5 @@
 gitpython>=2.1.8
-paramiko>=2.4.2
+paramiko>=2.9.0
 numpy==1.26.4
 matplotlib>=2.1.1
 pyephem>=3.7.6.0
@@ -13,5 +13,9 @@ imageio==2.6.1
 python-dvr>=0.0.1
 pyqtgraph>=0.12
 pyyaml
-tflite
+tflite-runtime
 opencv-python
+python-dvr>=0.0.1
+PyGObject
+astrometry
+pyclean>=2.7.6
