@@ -623,7 +623,7 @@ def extractStarsAndSave(config, ff_dir):
 
 
     # Run the QueuedPool for detection
-    workpool = QueuedPool(extractStarsFF, cores=config.num_cores, backup_dir=ff_dir, input_queue_maxsize=None)
+    workpool = QueuedPool(extractStarsFF, cores=config.num_cores, backup_dir=ff_dir, input_queue_maxsize=None, low_priority=True)
 
 
     # Add jobs for the pool
