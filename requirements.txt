@@ -13,7 +13,7 @@ imageio==2.6.1
 python-dvr>=0.0.1
 pyqtgraph>=0.12
 pyyaml
-tflite-runtime
+tf-nightly
 opencv-python
 python-dvr>=0.0.1
 PyGObject
