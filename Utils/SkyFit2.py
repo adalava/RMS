@@ -4505,9 +4505,16 @@ class PlateTool(QtWidgets.QMainWindow):
             self.config.star_catalog_path = os.path.join(self.config.rms_root_dir, 'Catalogs')
             print("Updated catalog path to: ", self.config.star_catalog_path)
 
+        # Compute the number of years from J2000
+        years_from_J2000 = (
+            self.img_handle.beginning_datetime - datetime.datetime(2000, 1, 1, 12, 0, 0)
+                ).days/365.25
+    
         # Load catalog stars
         catalog_stars, self.mag_band_string, self.config.star_catalog_band_ratios = StarCatalog.readStarCatalog(
-            self.config.star_catalog_path, self.config.star_catalog_file, lim_mag=lim_mag,
+            self.config.star_catalog_path, self.config.star_catalog_file, 
+            years_from_J2000=years_from_J2000,
+            lim_mag=lim_mag,
             mag_band_ratios=self.config.star_catalog_band_ratios)
 
         return catalog_stars
@@ -4825,7 +4832,7 @@ class PlateTool(QtWidgets.QMainWindow):
         return dark_file, dark
 
 
-    def addCentroid(self, frame, x_centroid, y_centroid, mode=1, snr=0, saturated=False):
+    def addCentroid(self, frame, x_centroid, y_centroid, mode=1, snr=1, saturated=False):
         """
         Adds or modifies a pick marker at given frame to self.pick_list with given information
 
@@ -6175,8 +6182,15 @@ class PlateTool(QtWidgets.QMainWindow):
             if pick['mode'] == 0:
                 continue
 
+
+            # If SNR is None, then set the random error to 0
+            if pick['snr'] is None:
+                mag_err_random = 0
+
+            else:
+                mag_err_random = 2.5*np.log10(1 + 1/pick['snr'])
+
             # Compute the magnitude errors
-            mag_err_random = 2.5*np.log10(1 + 1/pick['snr'])
             mag_err_total = np.sqrt(mag_err_random**2 + self.platepar.mag_lev_stddev**2)
 
             # Use a modified platepar if ground points are being picked
