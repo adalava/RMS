@@ -25,3 +25,4 @@ astrometry==3.0.0; python_version >= "3.5" and python_version < "3.8" and sys_pl
 pyclean>=2.7.6; python_version >= "3.5"
 ifaddr; sys_platform =="win32"
 PyGObject<=3.50; python_version >= '3.6'
+opencv-python
