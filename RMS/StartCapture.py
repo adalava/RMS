@@ -381,6 +381,11 @@ def runCapture(config, duration=None, video_file=None, nodetect=False, detect_en
     except Exception as e:
         log.debug('Could not generate config audit report:' + repr(e))
 
+    # Check if kht module is present
+    log.info(config.kht_lib_path)
+    if os.path.isfile(config.kht_lib_path) is False:
+        log.error("kht_module not found at {}".format(config.kht_lib_path))
+
     # Check for and get an updated mask
     if config.mask_download_permissive:
         downloadNewMask(config)
@@ -1071,6 +1076,10 @@ if __name__ == "__main__":
     # Load the config file
     config = cr.loadConfigFromDirectory(cml_args.config, os.path.abspath('.'))
 
+    # Override data_dir if user requested it
+    if cml_args.data_dir:
+        config.data_dir = cml_args.data_dir[0]
+
 
     # Initialize the logger
     log_manager = LoggingManager()
@@ -1110,12 +1119,6 @@ if __name__ == "__main__":
 
     # Change the Ctrl+C action to the special handle
     setSIGINT()
-
-
-    # Override data_dir if user requested it
-    if cml_args.data_dir:
-        log.info("Data directory set to: " + cml_args.data_dir[0])
-        config.data_dir = cml_args.data_dir[0]
 
     # Make the data directories
     root_dir = os.path.abspath(config.data_dir)
